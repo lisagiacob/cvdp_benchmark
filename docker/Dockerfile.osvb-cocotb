@@ -1,0 +1,19 @@
+# Base pinned by digest: the moving ghcr.io/hdl/sim/osvb:latest was republished
+# (Oct 2026) without libpython3.9-dev, which breaks cocotb ("Unable to find
+# libpython"), and with newer simulators (Icarus 14, Verilator 5.053). This
+# digest is the base of all thesis runs: Icarus 13.0 (s20221226), Verilator
+# 5.027, libpython3.9 included.
+FROM hdlc/sim:osvb@sha256:6fc999d943f1b8f8c49e7221459ae01e57afd33f7e73c3734b9a65be25e7f434
+ARG COCOTB_VERSION="v2"
+
+RUN pip3 install --no-cache-dir --upgrade pip
+# Select with --build-arg COCOTB_VERSION=v1|v2 (default v2). Versions are
+# pinned to the ones used by all thesis runs, so rebuilding the image doesn't
+# silently change harness results (cocotb-bus/scapy too: scapy is a cocotb-bus
+# dependency). Keep in sync with src/agents/Dockerfile-base.
+RUN case "${COCOTB_VERSION}" in \
+        v1) COCOTB_SPEC='cocotb==1.9.2' ;; \
+        v2) COCOTB_SPEC='cocotb==2.0.1' ;; \
+        *) echo "Unsupported COCOTB_VERSION: ${COCOTB_VERSION}. Use v1 or v2." >&2; exit 1 ;; \
+    esac && \
+    pip3 install --no-cache-dir "${COCOTB_SPEC}" cocotb-bus==0.3.0 scapy==2.7.0

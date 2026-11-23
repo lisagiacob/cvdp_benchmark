@@ -78,6 +78,11 @@ def add_common_arguments(parser: argparse.ArgumentParser) -> None:
                        help="Expose the golden patch file to the agent Docker container")
     parser.add_argument("--force-agentic-include-harness", action="store_true",
                        help="Expose harness-related files to the agent Docker container")
+    parser.add_argument("--agent-include-eda", action="store_true",
+                       help="Expose the commercial EDA tools (Cadence xrun) to the agent Docker container for datapoints that require them")
+    parser.add_argument("--iter-to-convergence", action="store_true",
+                       help="(Agentic, OpenCode only) After each agent session run the official harness and, while it fails, "
+                            "resume the agent session with the harness output (see ITC_* settings)")
     parser.add_argument("--force-copilot", action="store_true",
                        help="Force copilot mode processing for agentic datasets")
     parser.add_argument("--copilot-refine", type=str,
@@ -122,7 +127,14 @@ def add_validation_checks(args: argparse.Namespace) -> None:
         if model_specified and agent_specified:
             print("Error: Cannot specify both --model and --agent together. Use either model-based LLM or agent-based processing.")
             exit(1)
-    
+
+    # Iterate-to-convergence resumes an OpenCode session, so it needs an OpenCode agent
+    if getattr(args, 'iter_to_convergence', False):
+        agent = (getattr(args, 'agent', None) or "").lower()
+        if not args.llm or not agent or any(k in agent for k in ("claude", "codex", "claw")):
+            print("Error: --iter-to-convergence requires --llm and an OpenCode agent image (--agent)")
+            exit(1)
+
     # Validate local inference arguments
     if hasattr(args, 'prompts_responses_file'):
         # Check that local inference models are used with the file argument

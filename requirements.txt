@@ -9,3 +9,8 @@ tabulate
 numpy
 colorama
 ruamel.yaml
+# Non-agentic Claude / Gemini wrappers (src/llm_models/, loaded via CUSTOM_MODEL_FACTORY)
+anthropic
+google-genai
+# Only for list_bedrock_models.py (lists the models available on AWS Bedrock)
+boto3

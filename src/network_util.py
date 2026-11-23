@@ -140,7 +140,14 @@ def add_network_to_docker_compose(docker_compose_path, network_name):
         # If the file is empty or invalid, create a basic structure
         if not data:
             data = {'services': {}}
-        
+
+        # Services with network_mode (e.g. host, for the EDA license server) can't also
+        # declare networks; if every service uses it, the file needs no networks section
+        services = data.get('services') or {}
+        if services and all('network_mode' in service_config for service_config in services.values()):
+            print(f"All services in {docker_compose_path} use network_mode, not adding networks")
+            return True
+
         # Check if networks section already exists and if it has a default network
         if 'networks' not in data or 'default' not in data.get('networks', {}):
             # Add/update networks section with our default network
@@ -156,7 +163,7 @@ def add_network_to_docker_compose(docker_compose_path, network_name):
             if 'services' in data:
                 for service_name, service_config in data['services'].items():
                     # Add networks to the service if it doesn't already have it
-                    if 'networks' not in service_config:
+                    if 'networks' not in service_config and 'network_mode' not in service_config:
                         service_config['networks'] = ['default']
         
             # Write the updated docker-compose file

@@ -1,0 +1,37 @@
+# Pinned synthesis base for the cid007 harness (OSS_PNR_IMAGE).
+#
+# ghcr.io/hdl/impl/pnr is a moving tag: until Oct 2026 it shipped
+# Yosys 0.36+42 (git 70d35314d), used by all earlier thesis runs. In Nov 2026 it
+# was republished with Yosys 0.66, whose `stat` output dropped the
+# "Number of wires: N" format parsed by the dataset's synth.py, so every
+# synthesis test fails with KeyError. Old digests are no longer published.
+#
+# This image rebuilds that exact Yosys commit and installs it on top of the
+# current pnr image (pinned by digest: Debian 11, Python 3.9).
+#
+#   docker build -f docker/Dockerfile.pnr-yosys036 -t cvdp-pnr:yosys-0.36 docker
+#   .env: OSS_PNR_IMAGE=cvdp-pnr:yosys-0.36
+
+ARG PNR_BASE=ghcr.io/hdl/impl/pnr@sha256:8c0715cc390de24881109f1e42b31d7fe851d19f1351a2c9f5c889eed8f1390e
+ARG YOSYS_COMMIT=70d35314dbd7521870047ed607897f22dc48cbc3
+
+FROM debian:bullseye-slim AS build
+ARG YOSYS_COMMIT
+# Debian 11 is EOL: its repositories moved to archive.debian.org.
+RUN sed -i 's|http://deb.debian.org|http://archive.debian.org|g' /etc/apt/sources.list \
+    && echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99archive
+RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential clang bison flex gawk git ca-certificates pkg-config \
+        libreadline-dev tcl-dev libffi-dev zlib1g-dev python3 \
+    && rm -rf /var/lib/apt/lists/*
+RUN git clone https://github.com/YosysHQ/yosys.git /yosys \
+    && cd /yosys && git checkout ${YOSYS_COMMIT} && git submodule update --init
+WORKDIR /yosys
+RUN make config-clang \
+    && make -j"$(nproc)" ENABLE_ABC=1 \
+    && make install PREFIX=/opt/yosys
+
+FROM ${PNR_BASE}
+RUN rm -rf /usr/local/bin/yosys* /usr/local/share/yosys
+COPY --from=build /opt/yosys/ /usr/local/
+RUN yosys -V

@@ -1,0 +1,32 @@
+FROM docker.io/rockylinux/rockylinux:8.10
+
+WORKDIR /
+
+RUN dnf install -y ksh tcsh libnsl.x86_64 && dnf clean all
+
+# Cadence tools are mounted at runtime from the host (see repository.py).
+# Paths mirror the module environment on philae.
+ENV CDS_XCELIUM=/space/tools/cadence/2025-26/RHELx86/XCELIUM_25.03.006
+ENV PATH="$PATH:/space/tools/cadence/2025-26/RHELx86/XCELIUM_25.03.006/bin"
+ENV PATH="$PATH:/space/tools/cadence/2025-26/RHELx86/XCELIUM_25.03.006/tools/bin/64bit"
+ENV PATH="$PATH:/space/tools/cadence/2025-26/RHELx86/XCELIUM_25.03.006/tools/bin"
+ENV CDS_VMANAGER=/space/tools/cadence/2025-26/RHELx86/VMANAGER_25.09.001
+ENV PATH="$PATH:/space/tools/cadence/2025-26/RHELx86/VMANAGER_25.09.001/bin"
+
+# License server: FlexLM bound to localhost on philae.
+# Containers use network_mode: host (see repository.py), so localhost resolves correctly.
+ENV CDS_LIC_FILE=5280@localhost
+ENV LM_LICENSE_FILE=5280@localhost
+
+# Skip RHEL version check (tools built for RHEL, running on Rocky Linux 8)
+ENV CDS_SKIP_OS_CHECK_ON_STARTUP=1
+
+# Python environment for pytest-based harnesses
+RUN dnf -y install python3.12 python3.12-devel
+ADD https://bootstrap.pypa.io/get-pip.py get-pip.py
+RUN python3 ./get-pip.py
+RUN python3 -m pip install pytest pytest-timeout
+
+# Pin cocotb to < 2.0 — benchmark test scripts use the 1.x API
+RUN echo "cocotb<2.0" > /etc/pip-constraints.txt
+ENV PIP_CONSTRAINT=/etc/pip-constraints.txt

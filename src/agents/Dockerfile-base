@@ -1,0 +1,81 @@
+# Base pinned by digest: the moving ghcr.io/hdl/sim/osvb:latest was republished
+# (Oct 2026) without libpython3.9-dev, which breaks cocotb ("Unable to find
+# libpython"), and with newer simulators (Icarus 14, Verilator 5.053). This
+# digest is the base of all thesis runs: Icarus 13.0 (s20221226), Verilator
+# 5.027, libpython3.9 included.
+FROM hdlc/sim:osvb@sha256:6fc999d943f1b8f8c49e7221459ae01e57afd33f7e73c3734b9a65be25e7f434
+
+WORKDIR /app
+
+# Debian 11 (bullseye) is EOL: deb.debian.org's bullseye-security pool now
+# 404s. Switch apt to the snapshot.debian.org sources the base image ships
+# (commented out), frozen at its build date, as the upstream image itself now
+# does. Keeps installed package versions reproducible too.
+RUN sed -i -e 's/^\(deb.*\)/# \1/' \
+        -e 's/^# deb \(.*snapshot.*\)/deb [check-valid-until=no] \1/' \
+        /etc/apt/sources.list
+
+# Install dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        wget build-essential libssl-dev zlib1g-dev \
+	    libncurses5-dev libncursesw5-dev libreadline-dev libsqlite3-dev \
+		libgdbm-dev libdb5.3-dev libbz2-dev libexpat1-dev liblzma-dev tk-dev \
+		libffi-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+# Install Node.js (includes npm)
+RUN apt-get update && \
+    apt-get install -y curl && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y nodejs
+RUN node --version && npm --version
+
+
+RUN wget https://www.python.org/ftp/python/3.12.5/Python-3.12.5.tgz
+RUN tar -xvf Python-3.12.5.tgz
+RUN cd Python-3.12.5 && \
+    ./configure --enable-optimizations --enable-shared \
+    && make -j$(nproc) \
+    && make altinstall \
+    && ldconfig \
+    && rm -rf Python-3.12.5.tgz Python-3.12.5
+
+# Upgrade pip
+RUN python3.12 -m pip install --upgrade pip
+
+# Declared here, not at the top: a build arg invalidates the cache of every
+# RUN after it, so the v1 and v2 bases share the (slow) layers above.
+# Versions are pinned to match the osvb-cocotb verification images
+# (docker/Dockerfile.osvb-cocotb), so harness-aware agents run the official
+# tests with the same cocotb that grades them (pytest/cocotb-bus/scapy too).
+ARG COCOTB_VERSION="v2"
+# System Python (3.9, `python3`): the base image ships a cocotb dev build
+# (2.0.0.dev0) for it, so pin it too. Uses `python3 -m pip` because after the
+# pip upgrade above `pip3` resolves to Python 3.12's pip; Debian's pip is kept
+# (not upgraded) so /usr/local/bin/pip3 stays 3.12's. Runs before the 3.12
+# install so shared console scripts (pytest, cocotb-config) end up on 3.12.
+RUN case "${COCOTB_VERSION}" in \
+        v1) COCOTB_SPEC='cocotb==1.9.2' ;; \
+        v2) COCOTB_SPEC='cocotb==2.0.1' ;; \
+        *) echo "Unsupported COCOTB_VERSION: ${COCOTB_VERSION}. Use v1 or v2." >&2; exit 1 ;; \
+    esac && \
+    python3 -m pip install --no-cache-dir \
+        pytest==8.3.2 \
+        "${COCOTB_SPEC}" \
+        cocotb-bus==0.3.0 \
+        scapy==2.7.0
+
+# Python 3.12: what the agents' `pytest` and `pip3` run.
+RUN case "${COCOTB_VERSION}" in \
+        v1) COCOTB_SPEC='cocotb==1.9.2' ;; \
+        v2) COCOTB_SPEC='cocotb==2.0.1' ;; \
+        *) echo "Unsupported COCOTB_VERSION: ${COCOTB_VERSION}. Use v1 or v2." >&2; exit 1 ;; \
+    esac && \
+    python3.12 -m pip install --no-cache-dir \
+        requests \
+        pyyaml \
+        pytest==8.3.2 \
+        "${COCOTB_SPEC}" \
+        cocotb-bus==0.3.0 \
+        scapy==2.7.0

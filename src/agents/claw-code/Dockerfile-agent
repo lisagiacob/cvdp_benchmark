@@ -1,0 +1,25 @@
+# cvdp-agent-base:v1 or :v2 (cocotb version), see the agent's build_agent.sh
+ARG BASE_IMAGE=cvdp-agent-base
+FROM ${BASE_IMAGE}
+
+WORKDIR /app
+
+RUN mkdir -p /code && chmod 777 /code
+
+# Install Rust and build the local Claw Code CLI from a build context copied
+# next to this Dockerfile. Build with:
+#   docker build -f claw-code/Dockerfile-agent \
+#     --build-context claw_source=/path/to/claw-code \
+#     -t cvdp-claw-agent .
+RUN apt-get update && apt-get install -y curl ca-certificates build-essential pkg-config git && \
+    curl https://sh.rustup.rs -sSf | sh -s -- -y && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/root/.cargo/bin:/usr/local/bin:${PATH}"
+
+COPY --from=claw_source . /opt/claw-code
+RUN cargo install --path /opt/claw-code/rust/crates/rusty-claude-cli --locked --root /usr/local && \
+    chmod 755 /usr/local/bin/claw
+
+ENV PYTHONUNBUFFERED=1
+ENV CLAW_PERMISSION_MODE=danger-full-access

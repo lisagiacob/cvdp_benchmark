@@ -264,21 +264,27 @@ class AgenticBenchmark(wrapper.AgenticWrapper):
                 print(f"Processing issue {issue} with agent {self.repo.agent}")
                 # Note: commented out th_prepare as it was in original AgenticHarness
                 # self.repo.th_prepare(issue, self.model)
+                if getattr(self.repo, 'iter_to_convergence', False):
+                    # the loop grades each iteration with this repository
+                    self.repo.runs.setdefault(issue, {}).update({'obj': obj, 'repo': repo})
                 if hasattr(self.repo, 'th_agent'):
                     self.repo.th_agent(issue)
-            
+
             # Skip evaluation for models that don't require it (e.g., local_export)
             if hasattr(self.model, 'requires_evaluation') and not self.model.requires_evaluation:
                 print(f"Skipping evaluation for issue {issue} - model does not require harness execution (export mode)")
                 # Create a minimal result structure for export mode
                 result = {
                     "category": "export_mode",
-                    "difficulty": "export_mode", 
+                    "difficulty": "export_mode",
                     "tests": [],
                     "errors": 0
                 }
             else:
                 result = self.repo.run(issue, obj, repo, self.model)
+                itc = self.repo.runs.get(issue, {}).get('itc')
+                if itc:
+                    result['itc'] = itc
             
             # Only store result in file if the model requires evaluation
             # (e.g., skip for local_export mode which only generates prompts)
@@ -335,8 +341,10 @@ def benchmark_main():
     add_validation_checks(args)
 
     # Apply subjective scoring flag from arguments or environment variable
-    # TODO: Temporarily hardcoded to True - previously: args.enable_sbj_scoring or ENABLE_SUBJECTIVE_SCORING
-    use_sbj_scoring = True
+    # TODO: Temporarily hardcoded to True - previously: 
+    #args.enable_sbj_scoring or ENABLE_SUBJECTIVE_SCORING
+    #use_sbj_scoring = True
+    use_sbj_scoring = False
     if use_sbj_scoring:
         os.environ["ENABLE_SUBJECTIVE_SCORING"] = "true"
         print("LLM-based subjective scoring is enabled")
@@ -465,6 +473,8 @@ if __name__ == "__main__":
             'force_agentic': args.force_agentic,
             'force_agentic_include_golden': args.force_agentic_include_golden,
             'force_agentic_include_harness': args.force_agentic_include_harness,
+            'agent_include_eda': args.agent_include_eda,
+            'iter_to_convergence': args.iter_to_convergence,
             'force_copilot': args.force_copilot,
             'repo_url': args.repo_url,
             'commit_hash': args.commit_hash,
@@ -505,10 +515,33 @@ if __name__ == "__main__":
     try:
         # If --regenerate-report flag is used and raw_result.json exists, load it directly
         raw_result_path = os.path.join(args.prefix, "raw_result.json")
-        if args.regenerate_report and os.path.exists(raw_result_path):
+        # if args.regenerate_report and os.path.exists(raw_result_path):
+        if args.regenerate_report:
+            if not os.path.exists(raw_result_path):
+                print(f"ERROR: --regenerate-report was passed but no raw_result.json was found at {raw_result_path}.")
+                print("Refusing to fall back to a full prepare+agent+eval run, which would re-invoke the agent on the whole dataset.")
+                print("Check --prefix points at the correct existing output directory.")
+                sys.exit(1)
             print(f"Loading existing raw_result.json from {raw_result_path}")
             with open(raw_result_path, 'r') as f:
                 res = json.load(f)
+
+            rpt = report.Report(
+                res,
+                prefix=args.prefix,
+                dataset_path=filename,
+                golden_mode=(not args.llm),
+                disable_patch=args.no_patch,
+                model_agent=args.agent if args.agent else (args.model if args.model is not None else config.get("DEFAULT_MODEL")),
+                force_agentic=args.force_agentic,
+                force_agentic_include_golden=args.force_agentic_include_golden,
+                force_agentic_include_harness=args.force_agentic_include_harness,
+                force_copilot=args.force_copilot,
+                copilot_refine=args.copilot_refine
+            )
+            rpt.report_header()
+            rpt.report_categories()
+            rpt.report_timers()
         else:
             # Check if single issue mode is requested
             if args.id:
@@ -536,6 +569,7 @@ if __name__ == "__main__":
                         'force_agentic': args.force_agentic,
                         'force_agentic_include_golden': args.force_agentic_include_golden,
                         'force_agentic_include_harness': args.force_agentic_include_harness,
+                        'agent_include_eda': args.agent_include_eda,
                         'force_copilot': args.force_copilot,
                         'copilot_refine': args.copilot_refine
                     })

@@ -104,10 +104,11 @@ class CopilotWrapper:
 
 class AgenticWrapper (CopilotWrapper):
 
-    def __init__(self, filename, golden = True, debug = False, host = False, prefix = None, custom_factory_path = None, network_name = None, manage_network = True, force_agentic = False, force_agentic_include_golden = False, force_agentic_include_harness = False, force_copilot = False, copilot_refine = None, repo_url = None, commit_hash = None):
+    def __init__(self, filename, golden = True, debug = False, host = False, prefix = None, custom_factory_path = None, network_name = None, manage_network = True, force_agentic = False, force_agentic_include_golden = False, force_agentic_include_harness = False, agent_include_eda = False, force_copilot = False, copilot_refine = None, repo_url = None, commit_hash = None, iter_to_convergence = False):
         self.force_agentic = force_agentic
         self.force_agentic_include_golden = force_agentic_include_golden
         self.force_agentic_include_harness = force_agentic_include_harness
+        self.agent_include_eda = agent_include_eda
         self.force_copilot = force_copilot
         self.copilot_refine = copilot_refine
         self.repo_url = repo_url
@@ -121,7 +122,9 @@ class AgenticWrapper (CopilotWrapper):
         # Pass the include parameters to the repo
         self.repo.include_golden_patch = force_agentic_include_golden
         self.repo.include_harness = force_agentic_include_harness
-        
+        self.repo.include_eda_tools = agent_include_eda
+        self.repo.iter_to_convergence = iter_to_convergence
+
         # Pass git repository parameters to the repo
         self.repo.repo_url = repo_url
         self.repo.commit_hash = commit_hash

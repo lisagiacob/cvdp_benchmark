@@ -1,0 +1,11 @@
+FROM cvdp-agent-base
+
+WORKDIR /app
+
+RUN mkdir -p /code && chmod 777 /code
+
+RUN pip3.12 install --no-cache-dir "anthropic[vertex]"
+
+ENV PYTHONUNBUFFERED=1
+
+ENTRYPOINT ["python3.12", "/app/my-agent.py"]

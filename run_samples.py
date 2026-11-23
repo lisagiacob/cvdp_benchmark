@@ -309,7 +309,7 @@ def run_samples(args: argparse.Namespace, n_samples: int, k_threshold: int) -> N
                 
             # Special handling for other boolean flags
             # TODO: Removed "enable_sbj_scoring" - temporarily disabled (hardcoded to True in run_benchmark.py)
-            if arg_name in ["force_agentic", "force_copilot", "llm", "host", "no_patch", "force_agentic_include_golden", "force_agentic_include_harness"] and arg_value is True:
+            if arg_name in ["force_agentic", "force_copilot", "llm", "host", "no_patch", "force_agentic_include_golden", "force_agentic_include_harness", "agent_include_eda"] and arg_value is True:
                 cmd.append(f"--{arg_name.replace('_', '-')}")
                 continue
                 

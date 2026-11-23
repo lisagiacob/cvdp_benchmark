@@ -6,6 +6,8 @@ import copy
 import difflib
 import os
 
+from src.constants import CODE_COMPREHENSION_CATEGORIES
+
 
 class DataTransformer:
     """Utility class for transforming datasets between Copilot and Agentic formats."""
@@ -89,7 +91,21 @@ class DataTransformer:
             # Move prompt to the top level
             if 'prompt' in transformed['input']:
                 transformed['prompt'] = transformed['input']['prompt']
-            
+
+            # Copilot mode tells the model where its answer is saved
+            # (dataset_processor appends "saved directly to: <file>"); an agent
+            # writes files itself, so it must be told the expected paths here,
+            # otherwise it guesses names the harness does not compile.
+            expected_files = list(transformed.get('output', {}).get('context', {}).keys())
+            cats = transformed.get('categories') or []
+            is_comprehension = bool(cats) and isinstance(cats[0], str) and cats[0].startswith('cid') \
+                and int(cats[0][3:]) in CODE_COMPREHENSION_CATEGORIES
+            if expected_files and not is_comprehension and 'prompt' in transformed:
+                if len(expected_files) == 1:
+                    transformed['prompt'] += f"\n\nWrite your solution to the file: {expected_files[0]}"
+                else:
+                    transformed['prompt'] += f"\n\nWrite your solution to these files: {', '.join(expected_files)}"
+
             # Handle output.response - add to context as a document
             # but also preserve the original output.response structure
             if 'output' in transformed and 'response' in transformed['output']:

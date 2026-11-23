@@ -1,7 +1,8 @@
 cvdp_*
+!src/agents/common/cvdp_prompt.py
 *.json
 *.jsonl
-!/example_dataset/*.jsonl
+!/dataset/*.jsonl
 *.log
 __pycache__
 /.env
@@ -12,3 +13,7 @@ work_*.txt
 /refinement_analysis*
 /failure_analysis*/
 /model_sweep_results*
+**/.DS_Store
+.DS_Store
+*DE.md
+xcelium.tgz

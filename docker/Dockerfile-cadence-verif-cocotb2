@@ -1,0 +1,7 @@
+# Cadence Xcelium image for the cocotb-2 datasets (CVDP v1.1.0+).
+# Built on top of cvdp-cadence-verif:latest (make cadence-up): the base image
+# pins cocotb<2.0 through PIP_CONSTRAINT, so the v1.1.0 harness Dockerfiles
+# (`pip3 install cocotb==2.0.1`) would fail to build on it.
+FROM cvdp-cadence-verif:latest
+
+RUN echo "cocotb<3.0" > /etc/pip-constraints.txt && pip3 install cocotb==2.0.1

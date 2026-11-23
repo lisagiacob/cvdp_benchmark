@@ -90,13 +90,21 @@ class ConfigManager:
                            description="Timeout for model operations in seconds")
         self.register_config("TASK_TIMEOUT", default=300, type_cast=int,
                            description="Timeout for task operations in seconds")
-        self.register_config("DOCKER_TIMEOUT", default=600, type_cast=int,
-                           description="Timeout for Docker operations in seconds")
-        self.register_config("DOCKER_TIMEOUT_AGENT", default=600, type_cast=int,
-                           description="Timeout for Docker agent operations in seconds")
+        self.register_config("DOCKER_TIMEOUT", default=None, type_cast=int,
+                           description="Timeout for Docker operations in seconds (None = no timeout)")
+        self.register_config("DOCKER_TIMEOUT_AGENT", default=None, type_cast=int,
+                           description="Timeout for Docker agent operations in seconds (None = no timeout)")
         self.register_config("QUEUE_TIMEOUT", default=None, type_cast=int,
                            description="Queue timeout in seconds")
-        
+
+        # Iterate-to-convergence (--iter-to-convergence, OpenCode only)
+        self.register_config("ITC_MAX_ITERATIONS", default=10, type_cast=int,
+                           description="Max agent -> official harness loops per datapoint")
+        self.register_config("ITC_STALL_THRESHOLD", default=3, type_cast=int,
+                           description="Stop when the harness fails with the same error signature this many times in a row")
+        self.register_config("ITC_AGENT_TIMEOUT", default=3600, type_cast=int,
+                           description="Safety cap for a single agent session in seconds (0 = none); a timeout ends only that iteration")
+
         # API Keys (not required during initialization, validated when needed)
         self.register_config("OPENAI_USER_KEY", required=False, 
                            description="OpenAI API key for model access")
@@ -136,6 +144,13 @@ class ConfigManager:
                            description="Docker image for simulation tasks with open-source EDA tools")
         self.register_config("OSS_PNR_IMAGE", default="ghcr.io/hdl/impl/pnr", type_cast=str,
                            description="Docker image for place-and-route tasks with open-source EDA tools")
+        self.register_config("CDS_XCELIUM", default="/space/tools/cadence/2025-26/RHELx86/XCELIUM_25.03.006", type_cast=str,
+                           description="Host path to Xcelium installation, mounted read-only into EDA containers")
+        self.register_config("CDS_VMANAGER", default="/space/tools/cadence/2025-26/RHELx86/VMANAGER_25.09.001", type_cast=str,
+                           description="Host path to Vmanager installation, mounted read-only into EDA containers")
+        self.register_config("NEW_HARNESS", default=False, type_cast=bool,
+                           description="Dataset harness targets cocotb 2 (v1.1.0+): its runner passes -timescale to xrun itself, "
+                                       "so EDA services running it don't get the default XRUNOPTS timescale")
     
     def register_config(self, 
                        key: str, 
@@ -204,8 +219,13 @@ class ConfigManager:
             Configuration value
         """
         if key in self.config:
-            return self.config[key]
-        
+            value = self.config[key]
+            # A registered-but-unset key caches as None; let an explicit
+            # runtime default stand in, per this method's documented contract.
+            if value is None and default is not None:
+                return default
+            return value
+
         # Handle unregistered keys
         raw_value = os.getenv(key, default)
         if raw_value is None:

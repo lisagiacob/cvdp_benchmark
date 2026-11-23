@@ -1,193 +1,224 @@
-# CVDP Benchmark
+# Agentic Workflows for RTL Code Generation
 
-The CVDP Benchmark is a framework for evaluating LLM and agent solutions on hardware verification challenges.
+Master's thesis project (Politecnico di Torino, A.Y. 2025/2026) by **Lisa Giacobazzi**.
+Supervisors: Alessio Burrello, Daniele Jahier Pagliari.
 
-## Front Matter
+This repository extends NVIDIA's [CVDP benchmark](https://github.com/NVlabs/cvdp_benchmark) (Comprehensive Verilog Design Problems, v1.0.2) to evaluate modern **AI coding agents** on RTL design tasks. The work has two goals: measuring how well the agents perform, and understanding **why** they fail.
 
-**Dataset**: The CVDP Benchmark dataset is available on Hugging Face at [🤗 nvidia/cvdp-benchmark-dataset](https://huggingface.co/datasets/nvidia/cvdp-benchmark-dataset).
+The evaluation covers the **160 code-generation datapoints** of CVDP (categories cid003, cid004, cid005, cid012, cid013, cid014, cid016). 92 of them run on open-source tools (Icarus/cocotb). The other 68 need commercial EDA tools and run on Cadence Xcelium.
 
-**Paper**: For detailed methodology and evaluation results, see our arXiv preprint: [Comprehensive Verilog Design Problems: A Next-Generation Benchmark Dataset for Evaluating Large Language Models and Agents on RTL Design and Verification](https://arxiv.org/abs/2506.14074).
+The thesis runs use CVDP **v1.0.2**. The repository also supports **v1.1.0**, where the same tasks come with a harness migrated to cocotb 2, and can re-grade the v1.0.2 runs with it without re-running the agents (see [section 5](#5-cvdp-v110-and-harness-re-runs)).
 
-**Dataset Notes**: The dataset published on Hugging Face contains the vast majority of evaluation problems discussed in the preprint. Twenty datapoints were omitted from the initial public release release due to test harness issues and licensing restrictions. Additionally, we excluded the reference solutions—'output' for non-agentic and 'patch' for agentic—from the initial dataset release to help mitigate data contamination. We hope to make these available in the future; if you have an immediate need, please feel free to reach out to discuss.
+Main additions to the original CVDP infrastructure:
 
-**New LLM Benchmarking Coalition**: The Silicon Integration Initiative (Si2) is adopting CVDP into their newly launched LLM Benchmarking Coalition (LBC), where industry and academic members work together to improve benchmarking and expedite the development of high-quality large language models for semiconductor design problems. The coalition builds upon CVDP by extending problems to cover new categories and design domains, refining benchmarking metrics, and maintaining a leaderboard. Learn more at [Si2 LLM Benchmarking Coalition](https://si2.org/si2-llm-benchmarking-coalition-kicks-off/).
+- **Non-agentic LLM wrappers** for Claude, GPT and Gemini models, built on the standard CVDP pipeline ([src/llm_models/](src/llm_models/)).
+- **Agentic integrations**, each running in its own Docker container on a shared workspace: [OpenCode](src/agents/opencode/), [Claude Code](src/agents/ClaudeCode/), [Claw Code](src/agents/claw-code/), [Codex](src/agents/codex/).
+- **Cadence Xcelium verification image** for the commercial datapoints ([docker/Dockerfile-cadence-verif](docker/Dockerfile-cadence-verif)).
+- **Log mining and failure analysis** of every failed agentic run ([log_mining_agentic.py](log_mining_agentic.py), [log_mining.py](log_mining.py)).
 
-## Quick Start
+Changes to the behaviour of the original CVDP pipeline:
 
-### Prerequisites
+- **Expected file names in `--force-agentic` prompts** ([src/data_transformer.py](src/data_transformer.py)). When a non-agentic datapoint is converted to agentic format, the sentence `Write your solution to the file: <path>` (or `to these files: <paths>` when there are several) is appended to its prompt. Code comprehension categories are excluded. In Copilot mode the model is told where its answer will be saved, but an agent writes the files itself, and without the expected paths it picked file names that the harness did not compile, so the datapoint failed regardless of the RTL quality.
 
-**Python 3.12 is recommended** for optimal compatibility.
+For details on the original benchmark, see [README_CVDP.md](README_CVDP.md), [README_AGENTIC.md](README_AGENTIC.md), [README_NON_AGENTIC.md](README_NON_AGENTIC.md) and the [CVDP paper](https://arxiv.org/abs/2506.14074).
 
-**Docker CE (Community Edition)** with a recent version is required:
-- Install Docker CE from [https://docs.docker.com/get-docker/](https://docs.docker.com/get-docker/)
-- **Add your user to the docker group** to run Docker without sudo permissions:
-  ```bash
-  # Add current user to docker group
-  sudo usermod -aG docker $USER
-  
-  # Log out and back in, or restart your session
-  # Verify Docker works without sudo:
-  docker --version
-  ```
+---
 
-### Setup Instructions
+## Repository layout
 
-**1. Create a virtual environment** (recommended):
+| Path | Content |
+|---|---|
+| `run_benchmark.py`, `run_samples.py`, `run_reporter.py` | CVDP entry points (single run, multi-sample pass@k, report regeneration) |
+| `dataset/` | CVDP v1.0.2 datasets used in the thesis (including cocotb v1/v2 variants) and the v1.1.0 agentic datasets (cocotb 2) |
+| `tools/resume_agentic_eval.py` | Resumes an interrupted agentic run, or re-grades a finished one with a newer dataset harness |
+| `src/` | Benchmark core, LLM wrappers (`llm_models/`) and agent adapters (`agents/`) |
+| `docker/` | Verification images: open-source (`Dockerfile.osvb-cocotb`) and Cadence (`Dockerfile-cadence-verif`) |
+| `Makefile` | Shortcuts to build images and launch every thesis experiment |
+| `log_mining*.py` | Failure analysis scripts |
+
+---
+
+## How to run
+
+### 1. Benchmark setup (official CVDP instructions)
+
+Prerequisites, installation, `.env` configuration, golden-solution sanity check and non-agentic runs follow the **official CVDP instructions**. Use them as they are:
+
+- [README_CVDP.md](README_CVDP.md) — Quick Start (Python 3.12, Docker CE, virtual environment, `requirements.txt`, `.env`)
+- [README_NON_AGENTIC.md](README_NON_AGENTIC.md) and [README_AGENTIC.md](README_AGENTIC.md) — the two evaluation workflows
+- Upstream repository: [NVlabs/cvdp_benchmark](https://github.com/NVlabs/cvdp_benchmark)
+
+Complete that setup before going on. The steps below cover only what this thesis adds on top of it.
+
+### 2. Thesis-specific configuration
+
+- **Folder name.** The Makefile targets call `../cvdp_benchmark/run_benchmark.py`, so clone this repository into a folder named `cvdp_benchmark` (`git clone https://github.com/lisagiacob/master_tesis_cvdp.git cvdp_benchmark`), or update the paths in the `Makefile`.
+- **`.env`.** Create it with `cp .env.example .env` (or `make setup`) and fill in the variables for the providers and agents you want to use (see below). [.env.example](.env.example) lists all of them.
+- **Machine-specific paths.** ⚠️ The Vertex AI credential mounts are hard-coded for the thesis server in `_gcp_auth_volumes()` and `_generate_gcp_host_access_token()` in [src/dataset_processor.py](src/dataset_processor.py) (`/home/giacobazzi/...`, `/snap/bin/gcloud`). The same applies to the Cadence install path in [docker/Dockerfile-cadence-verif](docker/Dockerfile-cadence-verif) and [src/config_manager.py](src/config_manager.py). Adapt them to your machine before running agentic or commercial experiments.
+
+### 3. LLM providers
+
+The thesis experiments used **Claude Sonnet 4.6** (and Claude 3.7 Sonnet for the model-scaling comparison). Each provider is configured through `.env`:
+
+| Provider | `.env` variables | Used by |
+|---|---|---|
+| **Google Vertex AI** (Claude) | `ANTHROPIC_VERTEX_PROJECT_ID`, `ANTHROPIC_VERTEX_LOCATION` (e.g. `global`), `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES=1` | Non-agentic `claude-sonnet-4-6`, Claude Code, OpenCode, Claw Code (`vertex_ai/...`) |
+| **Anthropic API** | `ANTHROPIC_API_KEY` (optionally `ANTHROPIC_BASE_URL`) | Claude Code and Claw Code (`LLM_MODEL=anthropic/...`, or a bare name when no Vertex project is set) |
+| **AWS Bedrock** | `BEDROCK_AWS_ACCESS_KEY_ID`, `BEDROCK_AWS_SECRET_ACCESS_KEY`, `BEDROCK_AWS_REGION_NAME` | Claude Code, OpenCode (`LLM_MODEL=bedrock/...`). With a `bedrock/` model no Vertex credential is forwarded to the agent container |
+| **OpenRouter** | `OPENROUTER_API_KEY` | Non-agentic `claude-3.7-sonnet`; OpenCode with `claude-3.7-*` or `gemini-*` models |
+| **OpenAI** | `OPENAI_USER_KEY` (non-agentic), `OPENAI_API_KEY` (agents) | Non-agentic `gpt-*` / `o3-pro` (official factory); OpenCode with `gpt-*` models |
+| **Google Gemini API** | `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) | Non-agentic `gemini`, `gemini-2.5-flash`, `gemini-2.5-pro` |
+
+For Vertex AI, authenticate on the host with `gcloud auth application-default login`. Agent containers receive a fresh access token generated on the host, plus the mounted gcloud config.
+
+**Choosing the model:**
+
+| Workflow | How the model is selected |
+|---|---|
+| Non-agentic | `-m <model>` (or `MODEL=<model>` with `make`). Claude, Gemini and OpenRouter models need the custom factory: `-c src/llm_models/custom_model_factory.py` or `CUSTOM_MODEL_FACTORY=src/llm_models/custom_model_factory.py` in `.env` |
+| All agents | `LLM_MODEL=<provider>/<model>` (LiteLLM form), shared by Claude Code, OpenCode, Claw Code and Codex. Change it with `make change-model MODEL=<provider>/<model>` |
+| Claude Code | `CLAUDE_CODE_MAX_TURNS` (default `30`) |
+
+Each agent translates `LLM_MODEL` to its own naming scheme:
+
+| `LLM_MODEL` | Claude Code | OpenCode | Claw Code |
+|---|---|---|---|
+| `bedrock/<id>` (e.g. `bedrock/global.anthropic.claude-sonnet-4-6`) | Bedrock, model `<id>` | `amazon-bedrock/<id>` | not supported |
+| `vertex_ai/<id>` (e.g. `vertex_ai/claude-sonnet-4-6@default`) | Vertex, model `<id>` | `google-vertex-anthropic/<id>` | `google-vertex-anthropic/<id>` |
+| `anthropic/<id>` | direct API, model `<id>` | `anthropic/<id>` | `<id>` |
+| `openrouter/<id>`, `openai/<id>` | — | as is | as is |
+| bare name (legacy, e.g. `claude-sonnet-4-6`) | Vertex if a project is set, else direct API | `claude-*` → Vertex, `claude-3.7-*` / `gemini-*` → OpenRouter, `gpt-*` → OpenAI | Vertex prefix if a project is set |
+
+Default when unset: `claude-sonnet-4-6` (bare name).
+
+Other useful variables: `TEMPERATURE` (default `0.0`), `CLAUDE_MAX_TOKENS` (non-agentic Claude output limit).
+
+### 4. Running the experiments (Makefile)
+
+Every thesis experiment has a `make` target. Run the commands from the repository root.
+
+**Build the images first:**
+
+| Target | What it builds |
+|---|---|
+| `make cocov1` / `make cocov2` | Open-source simulation images `osvb-cocotb:v1` (cocotb 1.9.2) and `osvb-cocotb:v2` (cocotb 2.0.1). Both can coexist: the `*-cocov1` / `*-cocov2` targets pick the matching one by overriding `OSS_SIM_IMAGE` |
+| `make cadence-up` | Cadence Xcelium image `cvdp-cadence-verif:latest` (commercial datasets only) |
+| `make cadence-cocotb2` | `cvdp-cadence-verif:cocotb2`: the same image with cocotb 2.0.1, for the v1.1.0 commercial dataset (run `make cadence-up` first) |
+| `make claude-up` | Claude Code agent images `claude-code-agent:v1` / `:v2` |
+| `make opencode-up` | OpenCode agent images `cvdp-opencode-agent:v1` / `:v2` (built from `../opencode`) |
+| `make codex-up` | Codex agent images `codex-agent:v1` / `:v2` (pin the CLI with `CODEX_VERSION=x.y.z`) |
+
+Each agent build script ([src/agents/](src/agents/)`*/build_agent.sh`) builds one `cvdp-agent-base` + agent image per cocotb version, so the agent tests with the same cocotb as the verification image. Build a single version with `COCOTB_VERSIONS=v2`. The v2 images are also tagged `:latest`, and each `cvdp-<agent>` image gets an alias without the `cvdp-` prefix (e.g. `opencode-agent:v2`); aliases share the same image ID and take no extra space.
+
+**Then launch a benchmark:**
+
+| Experiment | Claude Code | OpenCode | Codex |
+|---|---|---|---|
+| Agentic, non-commercial, cocotb v1 | `make claude-cocov1` | `make opencode-cocov1` | `make codex-cocov1` |
+| Agentic, non-commercial, cocotb v2 | `make claude-cocov2` | `make opencode-cocov2` | `make codex-cocov2` |
+| Agentic, commercial (Cadence) | `make claude-commercial` | `make opencode-commercial` | `make codex-commercial` |
+| Single datapoint (debug, cocotb v2) | `make claude-sd DP=<id>` | `make opencode-sd DP=<id>` | `make codex-sd DP=<id>` |
+
+The `*-commercial` targets pass the agent image without a tag, so they use `:latest` (= v2). Targets that don't override `OSS_SIM_IMAGE` use the value in `.env`.
+
+| Experiment | Target |
+|---|---|
+| Non-agentic code generation, cocotb v1 / v2 | `make nonagentic-codegen-v1 MODEL=<model>` / `make nonagentic-codegen-v2 MODEL=<model>` |
+
+Make variables:
+- `MODEL=<model>`: model for the non-agentic targets. Always set it: the default `azure-gpt-4o` is not registered in this repository's model factories.
+- `DP=<datapoint id>`: datapoint for the `*-sd` targets (default `cvdp_agentic_AES_encryption_decryption_0018`).
+
+Every `*-sd`, `*-cocov*`, `*-commercial` and `nonagentic-*` target:
+- writes results to its own `work_<target>/` directory (`report.txt`, `report.json`, plus per-datapoint harness and agent logs), so different targets can run in parallel; override it with `BENCHMARK_PREFIX=<dir>`;
+- refuses to start if that directory is not empty (move or delete previous results first);
+- sends an email with the outcome and duration when `NOTIFY_EMAIL_TO` is set in `.env`.
+
+**Claw Code** has no Makefile target. Build and run it directly (see [src/agents/claw-code/README.md](src/agents/claw-code/README.md)):
+
 ```bash
-# Create virtual environment
-python -m venv cvdp_env
-
-# Activate virtual environment
-# On Linux/macOS:
-source cvdp_env/bin/activate
-# On Windows:
-cvdp_env\Scripts\activate
+CLAW_CODE_ROOT=../claw-code src/agents/claw-code/build_agent.sh
+./run_benchmark.py -f dataset/cvdp_v1.0.2_agentic_code_generation_no_commercial_COCOTBV2.jsonl -l -g claw-code-agent
 ```
 
-**2. Install Python dependencies**:
+The Makefile targets are shortcuts for `run_benchmark.py`. For example, `make claude-sd DP=<id>` is equivalent to:
+
 ```bash
-pip install -r requirements.txt
+./run_benchmark.py -f dataset/cvdp_v1.0.2_agentic_code_generation_no_commercial_COCOTBV2.jsonl \
+  -l -g claude-code-agent:v2 -i <id>
 ```
 
-**3. Configure environment variables**:
+The agent backend is chosen from the image name passed with `-g` (`codex`, `claw`, `claude`, otherwise OpenCode).
+
+- OpenCode and Claw Code are built from source. Their repositories must be cloned next to this one (`../opencode`, `../claw-code`), or you can point to them with `CLAW_CODE_ROOT`.
+
+### 5. CVDP v1.1.0 and harness re-runs
+
+**What changes in v1.1.0.** The tasks are the same as in v1.0.2: same 160 ids, identical prompts, context files and reference patches. Only the harness changes, migrated to the cocotb 2 API:
+
+- `.value.to_unsigned()` → `int(...)`, `units=` → `unit=`, `cocotb.runner` → `cocotb_tools.runner`, `TestFailure` → `AssertionError`;
+- `period_high` on clocks with an odd period;
+- `defines={"SIMULATION": None}` → `1`;
+- no more `cocotb` / `cocotb-bus` version pins in the harness Dockerfiles.
+
+The non-commercial datapoints are in a single file, with no cocotb V1/V2 split: all 92 run on `osvb-cocotb:v2`.
+
+| File | Datapoints |
+|---|---|
+| `dataset/cvdp_v1.1.0_agentic_code_generation_no_commercial.jsonl` | 92 (open-source tools, cocotb 2) |
+| `dataset/cvdp_v1.1.0_agentic_code_generation_commercial.jsonl` | 68 (Cadence Xcelium, cocotb 2) |
+
+The migration fixes the failures caused by cocotb 2 incompatibilities in the v1.0.2 harness (e.g. `'Logic' object has no attribute 'to_unsigned'`, `Bad period`). Dataset design flaws such as a `.env` that leaves out RTL files, undocumented internal signals the testbench reads, or specs and testbenches that disagree are still there.
+
+Two infrastructure settings are needed for the commercial v1.1.0 harness:
+
+- **`cvdp-cadence-verif:cocotb2`** (`make cadence-cocotb2`). The harness Dockerfiles install `cocotb==2.0.1`, which the `cocotb<2.0` constraint of `cvdp-cadence-verif:latest` rejects.
+- **`NEW_HARNESS=true`.** The cocotb 2 runner passes `-timescale` to xrun itself. Without the flag, the default timescale that [src/commercial_eda.py](src/commercial_eda.py) adds through `XRUNOPTS` would be a second one, and xrun stops with `*E,OPTNOML`. With the flag, `XRUNOPTS` is left out only for the services whose cocotb runner sets a timescale. Leave it unset for v1.0.2.
+
+**Running on v1.1.0.** The `*-v110*` targets set `OSS_SIM_IMAGE=osvb-cocotb:v2`, `VERIF_EDA_IMAGE=cvdp-cadence-verif:cocotb2` and `NEW_HARNESS=true`, and use the `:v2` agent images:
+
+| Experiment | Claude Code | OpenCode | Codex |
+|---|---|---|---|
+| Agentic, non-commercial | `make claude-v110` | `make opencode-v110` | `make codex-v110` |
+| Agentic, non-commercial, harness aware (BA) | `make claude-v110-ba` | `make opencode-v110-ba` | `make codex-v110-ba` |
+| Agentic, commercial | `make claude-v110-commercial` | `make opencode-v110-commercial` | `make codex-v110-commercial` |
+| Agentic, commercial, xrun in the agent container | `make claude-v110-commercial-eda` | `make opencode-v110-commercial-eda` | `make codex-v110-commercial-eda` |
+| Agentic, commercial, harness aware (BA) | `make claude-v110-commercial-ba` | `make opencode-v110-commercial-ba` | `make codex-v110-commercial-ba` |
+
+They behave like the v1.0.2 targets: they write to `work_<target>/`, refuse to start on a non-empty directory and send the notification email.
+
+**Re-grading a v1.0.2 run with the v1.1.0 harness.** The agent inputs are the same in both versions, so the RTL an agent produced on v1.0.2 can be graded again with the v1.1.0 harness, without running the agent again:
+
 ```bash
-cp .env.example .env
-# Edit .env with your OpenAI API key:
-# OPENAI_USER_KEY=your_api_key_here
+make rerun-harness WORK=work_opencode_cocov2-ba_5-5          # -> work_opencode_cocov2-ba_5-5_rr/
+make rerun-harness WORK=work_opencode_commercial-ba_5-5 DRY=1  # only print what would run
 ```
 
-## 🤖 Try Non-Agentic Workflow (LLM-based)
+The target calls [tools/resume_agentic_eval.py](tools/resume_agentic_eval.py) with `--copy-to --only-eval --refresh-harness`:
 
-Evaluate language models via direct API calls on example problems:
+1. **Copy.** `WORK` is copied to `<WORK>_rr` (override with `RR_OUT=<dir>`), and only the copy is touched. The original keeps its results, logs and `raw_result.json`.
+2. **Refresh.** For each datapoint the agent processed, `src/`, `docker-compose.yml` and `Dockerfile` are rewritten from the v1.1.0 dataset. The previous files are moved to `harness/<n>/harness_backup_<timestamp>/`, and the agent output (`rtl/`, `verif/`, `docs/`, `agent_changes.patch`) is left as it is.
+3. **Images.** Image placeholders resolve to the images of the original run, except `__OSS_SIM_IMAGE__` → `osvb-cocotb:v2` and, on commercial runs, `__VERIF_EDA_IMAGE__` → `cvdp-cadence-verif:cocotb2` (with `--new-harness`).
+4. **Evaluation and report.** The harness runs again. The external Docker network of the original run is recreated if it's gone. The datapoints of the dataset that the run doesn't contain (e.g. the V2 ones for a V1 run) are skipped. At the end the report is regenerated in `<WORK>_rr/report.txt`, and the full log goes to `<WORK>_rr.log`.
 
-**1. Test golden reference solutions first:**
+The dataset is picked from the name: `commercial` if `WORK` contains it, `no_commercial` otherwise (override with `DATASET=commercial|no_commercial`). The agent image is read from the run (override with `AGENT=<image>`); with `--only-eval` it is only used to label the report.
+
+The same script without `--refresh-harness` resumes an interrupted run: see the header of [tools/resume_agentic_eval.py](tools/resume_agentic_eval.py) for all its options.
+
+### 6. Failure analysis
+
 ```bash
-# Run golden solutions to verify test harness works  
-./run_benchmark.py -f example_dataset/cvdp_v1.0.1_example_nonagentic_code_generation_no_commercial_with_solutions.jsonl
+# Agentic runs: per-run loop outcome + reason the datapoint failed
+python3 log_mining_agentic.py work --report work/report.txt --out <output-dir>
 
-# Check results - should show 100% pass rate
-cat work/report.txt
+# Non-agentic runs: harness error classification
+python3 log_mining.py work/report.txt
 ```
 
-**2. Multi-sample evaluation (recommended - no-commercial dataset):**
-```bash
-# Run 5 samples for statistical reliability with Pass@1 (requires OPENAI_USER_KEY)
-./run_samples.py -f example_dataset/cvdp_v1.0.1_example_nonagentic_code_generation_no_commercial_with_solutions.jsonl -l -m gpt-4o-mini -n 5 -k 1 -p work_composite
+`log_mining_agentic.py` writes `agent_runs.csv`, `agent_failure_reasons.csv` and `agent_summary.txt`, including token usage and cost.
 
-# Check results in composite_report.txt
-cat work_composite/composite_report.txt
-```
+---
 
-**3. Single run with LLM (no-commercial dataset):**
-```bash
-# Same dataset with LLM evaluation (requires OPENAI_USER_KEY)
-./run_benchmark.py -f example_dataset/cvdp_v1.0.1_example_nonagentic_code_generation_no_commercial_with_solutions.jsonl -l -m gpt-4o-mini -p work_llm
+## License
 
-# Check LLM results
-cat work_llm/report.txt
-```
-
-**4. Try other example datasets:**
-```bash
-# Commercial dataset (5 samples - requires OPENAI_USER_KEY)
-# NOTE: Requires commercial EDA tools (Cadence Xcelium), license network, and VERIF_EDA_IMAGE setup
-# See README sections: "EDA License Network Setup" and "Custom Verification Images" 
-./run_samples.py -f example_dataset/cvdp_v1.0.1_example_nonagentic_code_generation_commercial_with_solutions.jsonl -l -m gpt-4o-mini -n 5 -k 1 -p work_commercial_composite
-
-# Code comprehension dataset (5 samples)  
-# NOTE: Uses BLEU/ROUGE scoring + LLM-based subjective scoring (requires OPENAI_USER_KEY)
-# Subjective scoring is automatically enabled - no additional configuration needed
-./run_samples.py -f example_dataset/cvdp_v1.0.1_example_nonagentic_code_comprehension_with_solutions.jsonl -l -m gpt-4o-mini -n 5 -k 1 -p work_comprehension_composite
-
-# Check results
-cat work_commercial_composite/composite_report.txt
-cat work_comprehension_composite/composite_report.txt
-```
-
-## 🔧 Try Agentic Workflow (Docker-based)
-
-Evaluate custom agents running in Docker containers:
-
-**1. Test golden reference solutions first:**
-```bash
-# Run golden solutions to verify test harness works
-./run_benchmark.py -f example_dataset/cvdp_v1.0.1_example_agentic_code_generation_no_commercial_with_solutions.jsonl
-
-# Check results - should show 100% pass rate
-cat work/report.txt
-```
-
-**2. Multi-sample evaluation with agent (recommended):**
-```bash
-# Copy and build the example agent first
-# NOTE: This is a dummy agent that will fail - it just replaces "input" with "loompa" in RTL
-# For real evaluation, you'll need to implement proper agent logic in agent.py
-cp -r examples/agent/ ./my-agent/
-cd my-agent/
-./build_agent.sh
-cd ..
-
-# Run 5 samples for statistical reliability with Pass@1
-./run_samples.py -f example_dataset/cvdp_v1.0.1_example_agentic_code_generation_no_commercial_with_solutions.jsonl -l -g cvdp-example-agent -n 5 -k 1 -p work_composite
-
-# Check results in composite_report.txt
-cat work_composite/composite_report.txt
-```
-
-**3. Single run with agent (no-commercial dataset):**
-```bash
-# Run agent on same dataset  
-# NOTE: Example agent is for demonstration only - expect low success rates
-./run_benchmark.py -f example_dataset/cvdp_v1.0.1_example_agentic_code_generation_no_commercial_with_solutions.jsonl -l -g cvdp-example-agent -p work_agent
-
-# Check agent results
-cat work_agent/report.txt
-```
-
-**4. Try commercial dataset with multi-sampling:**
-```bash
-# Agent run on commercial problems (5 samples)
-# NOTE: Requires commercial EDA tools (Cadence Xcelium), license network, and VERIF_EDA_IMAGE setup
-# NOTE: This is a dummy agent that will fail - it just replaces "input" with "loompa" in RTL
-./run_samples.py -f example_dataset/cvdp_v1.0.1_example_agentic_code_generation_commercial_with_solutions.jsonl -l -g cvdp-example-agent -n 5 -k 1 -p work_agentic_commercial_composite
-
-# Check results
-cat work_agentic_commercial_composite/composite_report.txt
-```
-
-**5. Debug single problem:**
-```bash
-# Run one problem to examine the agent workflow
-# USEFUL: Good for understanding how agents interact with the environment and debug failures  
-./run_benchmark.py -f example_dataset/cvdp_v1.0.1_example_agentic_code_generation_no_commercial_with_solutions.jsonl -i cvdp_agentic_fixed_arbiter_0001 -l -g cvdp-example-agent -p work_debug
-
-# Navigate to the work directory to examine agent execution
-cd work_debug/cvdp_agentic_fixed_arbiter_0001/harness/1/
-
-# Manually run the agent for debugging
-./run_docker_agent.sh -d
-
-# Run evaluation manually
-./run_docker_harness_direct.sh
-```
-
-## 🚀 Next Steps
-
-**Resources:**
-- **Full Dataset**: Download from [🤗 nvidia/cvdp-benchmark-dataset](https://huggingface.co/datasets/nvidia/cvdp-benchmark-dataset)
-- **Local Inference**: See [Local Inference Guide](LOCAL_INFERENCE_GUIDE.md) for using local models instead of API calls
-- **Custom Models**: See [Non-Agentic Guide](README_NON_AGENTIC.md) for custom model development
-- **Custom Agents**: See [Agentic Guide](README_AGENTIC.md) for building your own agents  
-- **Advanced Features**: See [Examples](examples/README.md) for model factories and custom implementations
-
-**📖 Complete Documentation:**
-For comprehensive documentation including detailed installation instructions, configuration options, advanced usage patterns, command-line reference, and troubleshooting guides, see [README_FULL.md](README_FULL.md).
-
-## Documentation Index
-
-- **[README_FULL.md](README_FULL.md)** - Complete documentation with detailed guides and configuration
-- **[README_NON_AGENTIC.md](README_NON_AGENTIC.md)** - Complete guide for non-agentic evaluation workflow
-- **[README_AGENTIC.md](README_AGENTIC.md)** - Complete guide for Docker agent evaluation workflow
-- **[LOCAL_INFERENCE_GUIDE.md](LOCAL_INFERENCE_GUIDE.md)** - Guide for using local models instead of API-based models
-- **[examples/README.md](examples/README.md)** - Custom model and agent development for end users
-- **[README_DEVELOPER.md](README_DEVELOPER.md)** - Internal development and architecture documentation
+Based on the NVIDIA CVDP benchmark, released under the Apache 2.0 license. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

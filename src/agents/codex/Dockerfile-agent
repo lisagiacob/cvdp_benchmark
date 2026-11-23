@@ -1,0 +1,26 @@
+# cvdp-agent-base:v1 or :v2 (cocotb version), see the agent's build_agent.sh
+ARG BASE_IMAGE=cvdp-agent-base
+FROM ${BASE_IMAGE}
+
+WORKDIR /app
+
+RUN mkdir -p /code && chmod 777 /code
+
+# Writable CODEX_HOME for the (non-root) benchmark user. Not under /tmp:
+# Codex refuses to create its helper binaries inside a temporary dir.
+RUN mkdir -p /opt/codex-home && chmod 777 /opt/codex-home
+ENV CODEX_HOME=/opt/codex-home
+
+ENV PYTHONUNBUFFERED=1
+
+# Codex CLI (npm launcher + static Rust binary). Kept as the last layer and
+# pinned through a build arg: build_agent.sh resolves the latest npm release
+# and passes it in, so the cache is reused until a new Codex version ships
+# and then only this layer is rebuilt.
+ARG CODEX_VERSION=latest
+RUN npm install -g @openai/codex@${CODEX_VERSION} && codex --version
+LABEL org.cvdp.codex-version=${CODEX_VERSION}
+
+# codex-agent.py is mounted at runtime by dataset_processor.py:
+#   src/agents/ -> /app/
+# so the script is available at /app/codex/codex-agent.py

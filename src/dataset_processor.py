@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import hashlib
 import time
 import json
 import re
 import os
+from pathlib import Path
+from pathlib import Path
 from . import repository
 import logging
 from .merge_in_memory import diff_apply
@@ -22,12 +25,143 @@ import shutil
 import subprocess
 import yaml
 from . import network_util
-from .dir_monitor import DirectorySizeMonitor
+from .dir_monitor import DirectorySizeMonitor, get_directory_size, compress_file
 from . import git_utils
 import psutil
 import sys
 # Load environment variables from .env file
 load_dotenv()
+
+def _resolve_agent_backend(agent_image: str = "") -> str:
+    """Return the benchmark agent backend inferred from the Docker image name."""
+    name = agent_image.lower()
+    if "codex" in name:
+        return "codex"
+    if "claw" in name:
+        return "claw"
+    if "claude" in agent_image.lower():
+        return "claude"
+    return "opencode"
+
+
+def _agent_entrypoint_for_backend(backend: str):
+    if backend == "codex":
+        return ["python3.12", "/app/codex/codex-agent.py"]
+    if backend == "claw":
+        return ["python3.12", "/app/claw-code/agent.py"]
+    if backend == "claude":
+        return ["python3.12", "/app/ClaudeCode/claude-code-agent.py"]
+    return ["python3.12", "/app/opencode/opencode.py"]
+
+
+def _llm_model() -> str:
+    """The single model every agent backend runs (LLM_MODEL in .env), in
+    LiteLLM "<provider>/<model>" form, e.g. bedrock/global.anthropic.claude-sonnet-4-6
+    or vertex_ai/claude-sonnet-4-6. Each agent translates it to its own CLI's
+    naming scheme (see src/agents/common/llm_model.py)."""
+    return str(config.get("LLM_MODEL", "") or "").strip()
+
+
+def _uses_bedrock() -> bool:
+    """Bedrock is selected by the LLM_MODEL provider prefix, for every backend."""
+    return _llm_model().startswith("bedrock/")
+
+
+def _agent_environment_for_backend(backend: str, host_access_token: str) -> dict:
+    common = {
+        "LLM_MODEL": _llm_model(),
+        "OPENAI_USER_KEY": config.get("OPENAI_USER_KEY", ""),
+        "ANTHROPIC_API_KEY": os.environ.get("ANTHROPIC_API_KEY", ""),
+        "ANTHROPIC_AUTH_TOKEN": os.environ.get("ANTHROPIC_AUTH_TOKEN", ""),
+        "ANTHROPIC_BASE_URL": os.environ.get("ANTHROPIC_BASE_URL", ""),
+        "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
+        "OPENROUTER_API_KEY": os.environ.get("OPENROUTER_API_KEY") or config.get("OPENROUTER_API_KEY", ""),
+    }
+
+    # Bedrock runs forward the BEDROCK_AWS_* creds under the standard AWS SDK
+    # names (read by the claude CLI, OpenCode and litellm alike) and
+    # deliberately omit every Vertex/GCP var, so a globally-set
+    # ANTHROPIC_VERTEX_PROJECT_ID can't leak into the container and give the
+    # agent's provider selection a Vertex credential to prefer over Bedrock.
+    if _uses_bedrock():
+        if not config.get("BEDROCK_AWS_ACCESS_KEY_ID"):
+            print("[WARNING] LLM_MODEL is a bedrock/ model but BEDROCK_AWS_ACCESS_KEY_ID is not set.")
+        common.update({
+            "AWS_ACCESS_KEY_ID": str(config.get("BEDROCK_AWS_ACCESS_KEY_ID", "") or ""),
+            "AWS_SECRET_ACCESS_KEY": str(config.get("BEDROCK_AWS_SECRET_ACCESS_KEY", "") or ""),
+            "AWS_REGION": str(config.get("BEDROCK_AWS_REGION_NAME", "us-east-1") or "us-east-1"),
+        })
+    else:
+        common.update({
+            "ANTHROPIC_VERTEX_PROJECT_ID": os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", ""),
+            "ANTHROPIC_VERTEX_LOCATION": os.environ.get("ANTHROPIC_VERTEX_LOCATION", ""),
+            "GOOGLE_APPLICATION_CREDENTIALS": "/gcp/creds.json",
+            "GOOGLE_EXTERNAL_ACCOUNT_ALLOW_EXECUTABLES": "1",
+            "CLOUDSDK_CONFIG": "/gcp/gcloud-config",
+            "GOOGLE_ACCESS_TOKEN": host_access_token,
+        })
+
+    if backend == "claw":
+        common.update({
+            "CLAW_PERMISSION_MODE": os.environ.get("CLAW_PERMISSION_MODE", "danger-full-access"),
+            "CLAW_TIMEOUT_SECONDS": os.environ.get("CLAW_TIMEOUT_SECONDS", "600"),
+            "CLAW_SKIP_PERMISSIONS": os.environ.get("CLAW_SKIP_PERMISSIONS", ""),
+        })
+    elif backend == "claude":
+        common.update({
+            "CLAUDE_CODE_MAX_TURNS": os.environ.get("CLAUDE_CODE_MAX_TURNS", "30"),
+        })
+    elif backend == "codex":
+        common.update({
+            "CODEX_TIMEOUT_SECONDS": os.environ.get("CODEX_TIMEOUT_SECONDS", "600"),
+            "CODEX_REASONING_EFFORT": os.environ.get("CODEX_REASONING_EFFORT", ""),
+            "CODEX_PROXY_BASE_URL": os.environ.get("CODEX_PROXY_BASE_URL", ""),
+            "CODEX_PROXY_API_KEY": os.environ.get("CODEX_PROXY_API_KEY", ""),
+            "CODEX_PRICE_INPUT": os.environ.get("CODEX_PRICE_INPUT", ""),
+            "CODEX_PRICE_CACHED": os.environ.get("CODEX_PRICE_CACHED", ""),
+            "CODEX_PRICE_OUTPUT": os.environ.get("CODEX_PRICE_OUTPUT", ""),
+        })
+    else:
+        common.update({
+            "OPENCODE_AGENT": os.environ.get("OPENCODE_AGENT", "build"),
+            "OPENCODE_EXECUTABLE": os.environ.get("OPENCODE_EXECUTABLE", "opencode"),
+        })
+
+    return common
+
+
+def _generate_gcp_host_access_token() -> str:
+    """Generate a fresh gcloud ADC access token on the HOST (where gcloud
+    works) to pass into agent containers, avoiding WIF pluggable-auth issues
+    inside Docker. Shared by every agent backend that authenticates to
+    Vertex AI (opencode, claw) — single source of truth."""
+    result = subprocess.run(
+        ["/snap/bin/gcloud", "auth", "application-default", "print-access-token"],
+        capture_output=True, text=True
+    )
+    token = result.stdout.strip() if result.returncode == 0 else ""
+    if token:
+        print("[INFO] Access token generato dall'host e passato al container.")
+    else:
+        print(f"[WARNING] Impossibile generare access token sull'host: {result.stderr.strip()}")
+    return token
+
+
+def _gcp_auth_volumes() -> list:
+    """Host:container volume mounts for GCP WIF credentials, shared by every
+    agent backend that authenticates to Vertex AI — single source of truth
+    so the paths can't drift between backends."""
+    return [
+        '/home/giacobazzi/gcp-wif-config-opencodeV.json:/gcp/creds.json',
+        '/home/giacobazzi/get-clean-token.sh:/gcp/get-clean-token.sh',
+        '/home/giacobazzi/.config/gcloud:/gcp/gcloud-config',
+    ]
+
+
+def _apply_agent_backend(service: dict, backend: str) -> None:
+    entrypoint = _agent_entrypoint_for_backend(backend)
+    if entrypoint:
+        service["entrypoint"] = entrypoint
 
 # ----------------------------------------
 # - Global Configurations
@@ -48,6 +182,32 @@ config.register_config("SUBJECTIVE_SCORING_MODEL", default="sbj_score", type_cas
                       description="Model to use for subjective scoring evaluation")
 config.register_config("SUBJECTIVE_SCORING_THRESHOLD", default=7.0, type_cast=float,
                       description="Threshold for LLM-based subjective scoring (1-10 scale)")
+
+# Iterate-to-convergence (--iter-to-convergence): harness log parsing and the
+# fixed message the agent session is resumed with after a failed harness run
+ITC_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+ITC_NUMBER = re.compile(r"0x[0-9a-fA-F]+|\d+(\.\d+)?")
+ITC_ERROR_LINE = re.compile(
+    r"Error|ERROR|error:|FAIL|failed|assert|Mismatch|mismatch|Expected|expected|"
+    r"\*E,|\*F,|ASRTST|Timeout|TIMEOUT|TESTS=|SystemExit|Traceback")
+ITC_NOISE_LINE = re.compile(r"PytestCacheWarning|config\.cache\.set|Deleted:|Untagged:|errors: 0, warnings")
+ITC_FEEDBACK_ERROR_LINES = 40
+ITC_FEEDBACK_TAIL_LINES = 40
+ITC_FEEDBACK_CHARS_PER_LOG = 6000
+ITC_FEEDBACK_CHARS_TOTAL = 15000
+ITC_FEEDBACK_TEMPLATE = (
+    "ITERATION {iteration} of {max_iter}: the official CVDP harness was run on the current "
+    "contents of the repository and it FAILED.\n\n"
+    "Below is the relevant part of its output. Find the root cause and fix the files you are "
+    "allowed to edit (never src/). Verify your fix if you can, then stop: the official harness "
+    "will be run again automatically, and the task is complete only when it passes.\n\n"
+    "{logs}\n")
+ITC_USAGE_KEYS = ("cost_usd", "prompt_tokens", "completion_tokens", "cache_read_tokens",
+                  "cache_write_tokens", "reasoning_tokens")
+ITC_USAGE_LINE = re.compile(
+    r"usage_summary cost_usd=(?P<cost_usd>[\d.]+) prompt_tokens=(?P<prompt_tokens>\d+) "
+    r"completion_tokens=(?P<completion_tokens>\d+) cache_read_tokens=(?P<cache_read_tokens>\d+) "
+    r"cache_write_tokens=(?P<cache_write_tokens>\d+) reasoning_tokens=(?P<reasoning_tokens>\d+)")
 
 # Print timeout configuration for debugging
 if QUEUE_TIMEOUT is not None:
@@ -149,13 +309,13 @@ class DatasetProcessor():
         self._init_subjective_scoring()
 
         self.folders = """You are a helpful assistance.
-Consider that you have a folder structure like the following:\n
-    - rtl/*   : Contains files which are RTL code.
-    - verif/* : Contains files which are used to verify the correctness of the RTL code.
-    - docs/*  : Contains files used to document the project, like Block Guides, RTL Plans and Verification Plans.
+        Consider that you have a folder structure like the following:\n
+            - rtl/*   : Contains files which are RTL code.
+            - verif/* : Contains files which are used to verify the correctness of the RTL code.
+            - docs/*  : Contains files used to document the project, like Block Guides, RTL Plans and Verification Plans.
 
-When generating files, return the file name in the correct place at the folder structure.
-"""
+        When generating files, return the file name in the correct place at the folder structure.
+        """
             
         self.schema = [
             '{ "code": [{ "<name>" : "<code>"}] }',
@@ -438,10 +598,23 @@ When generating files, return the file name in the correct place at the folder s
         from src import commercial_eda
         datapoint = self.context.get(id, {})
         requires_eda_license = commercial_eda.datapoint_requires_eda_license(datapoint)
+
+        cat = int(self.context[id]['categories'][0][3:])
+        sbj_model = self.sbj_llm_model if cat in CODE_COMPREHENSION_CATEGORIES else None
         
-        repo = repository.Repository(name, issue, self.files [id], harness['files'] if harness and 'files' in harness else harness, patches, host=self.host, sbj_llm_model=self.sbj_llm_model, network_name=getattr(self, 'network_name', None), manage_network=getattr(self, 'manage_network', True), requires_eda_license=requires_eda_license)
         
-        # Network configuration is now passed during construction, no need to set it after
+        repo = repository.Repository(
+            name,
+            issue,
+            self.files[id],
+            harness['files'] if harness and 'files' in harness else harness,
+            patches,
+            host=self.host,
+            sbj_llm_model=sbj_model,
+            network_name=getattr(self, 'network_name', None),
+            manage_network=getattr(self, 'manage_network', True),
+            requires_eda_license=requires_eda_license
+        )
         
         return (harness != None and harness != {}, repo)
 
@@ -828,18 +1001,24 @@ When generating files, return the file name in the correct place at the folder s
             output = self.files.get(id, {})
             diff   = dict(set(output.items()) ^ set(input.items()))
 
-            self.runs [id] = {
+            run_entry = {
                 'obj' : obj,
                 'repo' : repo,
                 'input' : input,
-                'output' : diff
+                'output' : diff,
             }
+
+            if "_agentic_" in id:
+                run_entry['agent_logfile'] = os.path.join(repo.report_path, f"{id}_agent.txt")
+                run_entry['agent_logfile'] = os.path.join(repo.report_path, f"{id}_agent.txt")
+
+            self.runs[id] = run_entry
 
         except Exception as e:
             # Log the error
             error_msg = str(e)
             logging.error(f"Error in repository preparation for {id}: {error_msg}")
-            
+
             # Mark this ID as having an error so we can skip it in the run phase
             self.runs[id] = {
                 'obj': False,
@@ -879,12 +1058,6 @@ When generating files, return the file name in the correct place at the folder s
                 q.put({id: error_result})
                 return
             
-            # Check if there was an agent error
-            if id in self.runs and 'agent_error' in self.runs[id]:
-                error_msg = self.runs[id]['agent_error']
-                logging.warning(f"Found agent error for {id}: {error_msg}")
-                # We still continue with execution as we may have partial results
-            
             # Run the normal execution
             res = self.run(
                 id = id,
@@ -892,9 +1065,32 @@ When generating files, return the file name in the correct place at the folder s
                 repo = self.runs[id]['repo'],
                 model = model
             )
+
+            agent_logfile = self.runs[id].get('agent_logfile', "")
+            # With --iter-to-convergence the log holds every session: an earlier
+            # session's timeout is not the outcome of the datapoint
+            itc = self.runs[id].get('itc')
+            if itc:
+                res['itc'] = itc
+
+            if agent_logfile and os.path.exists(agent_logfile):
+                with open(agent_logfile, "r") as f:
+                    agent_log_content = f.read()
+
+                agent_log_lower = agent_log_content.lower()
+
+                if not itc and (
+                    "agent process exited" in agent_log_lower
+                    or "opencode cli failed" in agent_log_lower
+                    or "codex cli failed" in agent_log_lower
+                    or "timed out" in agent_log_lower
+                ):
+                    self.runs[id]['agent_error'] = agent_log_content
+                else:
+                    self.runs[id].pop('agent_error', None)
             
             # If there was an agent error, add it to the result
-            if id in self.runs and 'agent_error' in self.runs[id]:
+            if self.runs[id].get('agent_error', '').strip():
                 if 'tests' in res:
                     # Add agent error to test results if not already present
                     agent_error_found = False
@@ -936,7 +1132,7 @@ When generating files, return the file name in the correct place at the folder s
                 "tests": [{"result": 1, "log": None, "error_msg": "th_run: " + error_msg, "execution": 0.0}],
                 "errors": 1
             }
-            
+
             # Add agent error if there was one
             if id in self.runs and 'agent_error' in self.runs[id]:
                 # Include agent logfile if available
@@ -1444,6 +1640,8 @@ class AgenticProcessor (DatasetProcessor):
         # Initialize include flags to False by default
         self.include_golden_patch = False
         self.include_harness = False
+        self.include_eda_tools = False
+        self.iter_to_convergence = False
 
         # Ensure patch_image Docker image exists for agentic heavy processing
         result = subprocess.run(["docker", "images", "-q", "patch_image"],
@@ -1603,6 +1801,13 @@ class AgenticProcessor (DatasetProcessor):
                                     workspace_volume = data['repo'].volume_name
                                     break
         
+        # Bedrock runs need no GCP token (and must not shell out to gcloud).
+        _host_access_token = "" if _uses_bedrock() else _generate_gcp_host_access_token()
+
+        agent_backend = _resolve_agent_backend(agent)
+        agent_environment = _agent_environment_for_backend(agent_backend, _host_access_token)
+        print(f"[INFO] Using agent backend: {agent_backend}")
+
         # Create docker-compose configuration for the agent
         if use_git_workspace and workspace_volume:
             # Use volume-based mounting for git workspaces
@@ -1613,12 +1818,15 @@ class AgenticProcessor (DatasetProcessor):
                         'volumes': [
                             f'{workspace_volume}:/code',
                             './prompt.json:/code/prompt.json',
-                            './rundir:/code/rundir'
+                            './rundir:/code/rundir',
+                            # './src:/code/src',  # disabled: src/ holds the harness testbench
+                            # (Repository.prepare() writes it here before the agent runs); only
+                            # mount it when include_harness is explicitly set, see below.
+                            f'{Path(__file__).parent / "agents"}:/app',
+                            *_gcp_auth_volumes(),
                         ],
                         'working_dir': '/code',
-                        'environment': {
-                            'OPENAI_USER_KEY': config.get('OPENAI_USER_KEY', '')
-                        }
+                        'environment': agent_environment
                     }
                 },
                 'volumes': {
@@ -1639,16 +1847,21 @@ class AgenticProcessor (DatasetProcessor):
                             './rtl:/code/rtl',
                             './verif:/code/verif',
                             './rundir:/code/rundir',
-                            './prompt.json:/code/prompt.json'
+                            # './src:/code/src',  # disabled: src/ holds the harness testbench
+                            # (Repository.prepare() writes it here before the agent runs); only
+                            # mount it when include_harness is explicitly set, see below.
+                            './prompt.json:/code/prompt.json',
+                            f'{Path(__file__).parent / "agents"}:/app',
+                            *_gcp_auth_volumes(),
                         ],
                         'working_dir': '/code',
-                        'environment': {
-                            'OPENAI_USER_KEY': config.get('OPENAI_USER_KEY', '')
-                        }
+                        'environment': agent_environment
                     }
                 }
             }
             print("[INFO] Using traditional directory-based mounting")
+
+        _apply_agent_backend(docker_compose['services']['agent'], agent_backend)
         
         # Add golden patch to volumes if it exists
         if hasattr(self, 'include_golden_patch') and self.include_golden_patch:
@@ -1663,16 +1876,27 @@ class AgenticProcessor (DatasetProcessor):
             # created by the Repository.prepare() method
             
             # First, make sure src directory exists and is populated
+            # Read-only: the official evaluation mounts this same src/, so the
+            # agent must not be able to change the harness it is graded with.
             src_dir = os.path.join(issue_path, "src")
             if os.path.exists(src_dir):
-                docker_compose['services']['agent']['volumes'].append('./src:/code/src')
-                print("Test harness src directory will be mounted in the agent container at /code/src")
-                            
+                docker_compose['services']['agent']['volumes'].append('./src:/code/src:ro')
+                print("Test harness src directory will be mounted (read-only) in the agent container at /code/src")
+
             # Add the docker-compose.yml file that was used to run the tests
             docker_compose_yml = os.path.join(issue_path, "docker-compose.yml")
             if os.path.exists(docker_compose_yml):
-                docker_compose['services']['agent']['volumes'].append('./docker-compose.yml:/code/docker-compose.yml')
-                print("Original docker-compose.yml will be mounted in the agent container at /code/docker-compose.yml")
+                docker_compose['services']['agent']['volumes'].append('./docker-compose.yml:/code/docker-compose.yml:ro')
+                print("Original docker-compose.yml will be mounted (read-only) in the agent container at /code/docker-compose.yml")
+
+        # Iterate-to-convergence: persistent OpenCode home (so the session can be
+        # resumed) and the loop state/feedback written by _itc_agent_loop()
+        if getattr(self, 'iter_to_convergence', False):
+            itc_dir = self._itc_dir(issue_path)
+            docker_compose['services']['agent']['volumes'].extend([
+                f'{itc_dir}/opencode-home:/tmp/opencode-home',
+                f'{itc_dir}/ctl:/tmp/cvdp_itc:ro',
+            ])
         
         # Add network configuration if we have a network name
         if hasattr(self, 'network_name') and self.network_name:
@@ -1691,7 +1915,13 @@ class AgenticProcessor (DatasetProcessor):
             datapoint = self.context.get(data_id, {})
             if commercial_eda.datapoint_requires_eda_license(datapoint):
                 license_network_name = config.get('LICENSE_NETWORK')
-                if license_network_name:
+                if getattr(self, 'include_eda_tools', False):
+                    # Same tools/license access as the harness: host network replaces
+                    # the bridge and license networks.
+                    commercial_eda.expose_cadence_tools_to_agent(docker_compose['services']['agent'], agent)
+                    docker_compose.pop('networks', None)
+                    print("Cadence tools (xrun) will be available in the agent container (host network)")
+                elif license_network_name:
                     # Ensure networks section exists
                     if 'networks' not in docker_compose:
                         docker_compose['networks'] = {}
@@ -1788,6 +2018,13 @@ class AgenticProcessor (DatasetProcessor):
             # Define kill command for monitoring
             kill_cmd = f"docker compose -f {docker_compose_path} -p {project_name} kill agent"
             
+            # With --iter-to-convergence the session cap is ITC_AGENT_TIMEOUT (enforced by
+            # the wrapper): don't let DOCKER_TIMEOUT kill the container before it
+            agent_timeout = repository.DOCKER_TIMEOUT
+            if getattr(self, 'iter_to_convergence', False) and agent_timeout:
+                itc_timeout = config.get('ITC_AGENT_TIMEOUT') or 0
+                agent_timeout = max(agent_timeout, itc_timeout + 300) if itc_timeout else None
+
             # Execute the script in a subprocess
             with open(logfile, 'w') as log_file:
                 # Use our own exec_timeout style function for consistency with src/repository.py
@@ -1806,10 +2043,10 @@ class AgenticProcessor (DatasetProcessor):
                 # Wait for the process to complete with timeout
                 try:
                     # Use communicate with timeout instead of wait()
-                    p.communicate(timeout=repository.DOCKER_TIMEOUT)
+                    p.communicate(timeout=agent_timeout)
                     returncode = p.returncode
                 except subprocess.TimeoutExpired:
-                    print(f'Timeout for {script_path} ({repository.DOCKER_TIMEOUT}s) expired')
+                    print(f'Timeout for {script_path} ({agent_timeout}s) expired')
                     # Kill the process tree
                     if hasattr(repository, 'kill_process_tree'):
                         repository.kill_process_tree(p.pid)
@@ -1854,6 +2091,12 @@ class AgenticProcessor (DatasetProcessor):
             # Note: Git workspace volume cleanup is handled by the repository's cleanup method
             # to ensure it persists for both harness and agent execution
             
+            # Copy per-iteration error log from container rundir to reports dir
+            error_log_src = os.path.join(issue_path, "rundir", "errorlog.txt")
+            if os.path.exists(error_log_src):
+                error_log_dst = os.path.join(reports_dir, f"{issue_id}_errorlog.txt")
+                shutil.copy2(error_log_src, error_log_dst)
+
             return returncode, logfile
         except Exception as e:
             logging.error(f"Error running agent script: {str(e)}")
@@ -1966,9 +2209,9 @@ class AgenticProcessor (DatasetProcessor):
             script_file.write(f"GROUP_ID=$(id -g)\n\n")
             script_file.write(f"if [ \"$DEBUG_MODE\" = true ]; then\n")
             script_file.write(f"  echo \"DEBUG MODE: Starting container with bash entrypoint\"\n")
-            script_file.write(f"  docker compose -f {docker_compose_path} -p {project_name} run --rm --user $USER_ID:$GROUP_ID --entrypoint bash agent\n")
+            script_file.write(f"  docker compose -f {docker_compose_path} -p {project_name} run --rm --user $USER_ID:$GROUP_ID -e AGENT_LOG_FILE=/code/rundir/agent.log -e ERROR_LOG_FILE=/code/rundir/errorlog.txt --entrypoint bash agent\n")
             script_file.write(f"else\n")
-            script_file.write(f"  docker compose -f {docker_compose_path} -p {project_name} run --rm --user $USER_ID:$GROUP_ID agent\n")
+            script_file.write(f"  docker compose -f {docker_compose_path} -p {project_name} run --rm --user $USER_ID:$GROUP_ID -e AGENT_LOG_FILE=/code/rundir/agent.log -e ERROR_LOG_FILE=/code/rundir/errorlog.txt agent\n")
             script_file.write(f"fi\n")
             script_file.write(f"exit_code=$?\n\n")
             script_file.write(f"# Exit with the same code as the docker command\n")
@@ -2041,9 +2284,12 @@ class AgenticProcessor (DatasetProcessor):
                     shutil.copytree(src, bak)
                 
                 if not self.golden:
-                    # Run agent
-                    agent_status, agent_logfile = self.agent_run(issue_path, self.agent)
-                
+                    # Run agent (until the official harness passes, with --iter-to-convergence)
+                    if getattr(self, 'iter_to_convergence', False):
+                        agent_status, agent_logfile = self._itc_agent_loop(id, issue_path, before_dir, dir_names)
+                    else:
+                        agent_status, agent_logfile = self.agent_run(issue_path, self.agent)
+
                     # Store agent log file info
                     result['agent_logfile'] = agent_logfile
                     
@@ -2151,6 +2397,351 @@ class AgenticProcessor (DatasetProcessor):
             # If this ID is already in the runs dict from preparation phase, update it with error
             if id in self.runs:
                 self.runs[id]['agent_error'] = f"th_agent: {error_msg}"
+
+    # ----------------------------------------
+    # - Iterate to convergence (--iter-to-convergence)
+    # ----------------------------------------
+
+    @staticmethod
+    def _itc_dir(issue_path):
+        """<prefix>/cvdp_<repo>/itc/<issue_id>: kept outside harness/<issue_id>, which is
+        the evaluation's docker build context and is watched by the size monitor."""
+        issue_path = os.path.abspath(issue_path)
+        repo_root = os.path.dirname(os.path.dirname(issue_path))
+        return os.path.join(repo_root, "itc", os.path.basename(issue_path))
+
+    @staticmethod
+    def _itc_error_lines(text):
+        """Lines of a harness log that say why it failed, deduplicated after masking numbers."""
+        seen, out = set(), []
+        for line in ITC_ANSI.sub("", text).splitlines():
+            s = line.strip()
+            if not ITC_ERROR_LINE.search(s) or ITC_NOISE_LINE.search(s):
+                continue
+            key = ITC_NUMBER.sub("N", s)[:160]
+            if key not in seen:
+                seen.add(key)
+                out.append(s[:300])
+        return out
+
+    def _itc_failed_logs(self, tests):
+        """(name, exit code, log text) for every failed test of one harness run."""
+        failed = []
+        for t in tests:
+            if t.get("result") == 0:
+                continue
+            log = t.get("log")
+            text = ""
+            if log and os.path.exists(log):
+                with open(log, "r", encoding="utf-8", errors="replace") as f:
+                    text = f.read()
+            name = os.path.basename(log) if log else "harness"
+            failed.append((name, t.get("result"), text or (t.get("error_msg") or "")))
+        return failed
+
+    def _itc_signature(self, failed):
+        """Error signature of a failed harness run: which tests failed and their masked error lines."""
+        parts = []
+        for name, _, text in failed:
+            parts.append(name)
+            parts.extend(sorted({ITC_NUMBER.sub("N", l)[:160] for l in self._itc_error_lines(text)[:40]}))
+        return hashlib.sha1("\n".join(parts).encode()).hexdigest()[:16]
+
+    def _itc_feedback(self, failed, iteration, max_iter):
+        """Fixed feedback message plus the relevant part of each failed harness log."""
+        blocks = []
+        for name, code, text in failed:
+            errors = self._itc_error_lines(text)[:ITC_FEEDBACK_ERROR_LINES]
+            tail = ITC_ANSI.sub("", text).splitlines()[-ITC_FEEDBACK_TAIL_LINES:]
+            body = "Error lines:\n" + "\n".join(errors) + "\n\n" if errors else ""
+            body += "Last lines of the log:\n" + "\n".join(l[:300] for l in tail)
+            blocks.append(f"### {name} (exit code {code})\n{body[-ITC_FEEDBACK_CHARS_PER_LOG:]}")
+        return ITC_FEEDBACK_TEMPLATE.format(
+            iteration=iteration, max_iter=max_iter,
+            logs="\n\n".join(blocks)[:ITC_FEEDBACK_CHARS_TOTAL])
+
+    ITC_WAVEFORM_EXT = (".vcd", ".fst", ".fsdb", ".vpd", ".wlf", ".ghw", ".trn", ".dsn")
+
+    def _itc_shrink_waveforms(self, issue_path):
+        """Shrink the waveform dumps the last harness run left in rundir/ when the
+        datapoint directory is over DOCKER_QUOTA_THRESHOLD_MB, otherwise the size
+        monitor kills the next agent session as soon as it starts (e.g. a TB that
+        never reaches $finish dumps a VCD until the harness timeout).
+        The dumps are gzipped first; only if the directory is still over the
+        threshold the compressed dumps are deleted, largest first.
+        Returns a note for the agent feedback, or "" when nothing was touched."""
+        threshold_mb = config.get("DOCKER_QUOTA_THRESHOLD_MB")
+        threshold = threshold_mb * 1024 * 1024
+        if get_directory_size(issue_path) <= threshold:
+            return ""
+
+        rundir = os.path.join(issue_path, "rundir")
+        waves = []
+        for dirpath, _, filenames in os.walk(rundir):
+            in_shm = any(p.endswith(".shm") for p in os.path.relpath(dirpath, rundir).split(os.sep))
+            for name in filenames:
+                if name.endswith(".gz"):
+                    continue
+                if in_shm or name.lower().endswith(self.ITC_WAVEFORM_EXT):
+                    waves.append(os.path.join(dirpath, name))
+
+        rel = lambda p: os.path.relpath(p, issue_path)
+        compressed, deleted = [], []
+        for path in waves:
+            gz = path + ".gz"
+            try:
+                # A .gz left by an earlier iteration is stale: the new dump replaces it
+                if os.path.exists(gz):
+                    os.remove(gz)
+            except OSError as e:
+                print(f"[ITC] could not remove stale {gz}: {e}")
+                continue
+            ok, details = compress_file(path)
+            if ok:
+                compressed.append((gz, details["original_size_mb"], details["compressed_size_mb"]))
+
+        if get_directory_size(issue_path) > threshold:
+            for gz, _, _ in sorted(compressed, key=lambda c: c[2], reverse=True):
+                try:
+                    os.remove(gz)
+                    deleted.append(gz)
+                except OSError as e:
+                    print(f"[ITC] could not delete {gz}: {e}")
+                if get_directory_size(issue_path) <= threshold:
+                    break
+
+        if not compressed:
+            print(f"[ITC] {issue_path} is over {threshold_mb} MB but has no waveform dump to shrink")
+            return ""
+        kept = [c for c in compressed if c[0] not in deleted]
+        parts = []
+        if kept:
+            parts.append("compressed with gzip (read them with zcat/zgrep): " + ", ".join(
+                f"{rel(gz)} ({orig:.0f} MB -> {comp:.1f} MB)" for gz, orig, comp in kept))
+        if deleted:
+            parts.append("deleted because still too large after compression: " + ", ".join(
+                f"{rel(gz)[:-3]} ({orig:.0f} MB)" for gz, orig, _ in compressed if gz in deleted))
+        msg = "; ".join(parts)
+        print(f"[ITC] waveform dumps over {threshold_mb} MB {msg}")
+        return (f"\n\nNote: the previous harness run left waveform dumps that exceeded the "
+                f"workspace size limit ({threshold_mb} MB). They were {msg}. A very large dump "
+                "usually means the simulation never reached $finish.\n")
+
+    @staticmethod
+    def _itc_empty_dir(path):
+        """Remove everything inside `path`, including files a root container left there."""
+        try:
+            for name in os.listdir(path):
+                p = os.path.join(path, name)
+                if os.path.isdir(p) and not os.path.islink(p):
+                    shutil.rmtree(p)
+                else:
+                    os.remove(p)
+            return
+        except OSError:
+            pass
+        # Not removable by the host user (no sudo): a throwaway root container can
+        subprocess.run(
+            ["docker", "run", "--rm", "-v", f"{os.path.abspath(path)}:/d",
+             "alpine", "sh", "-c", "rm -rf /d/* /d/.[!.]* /d/..?* 2>/dev/null || true"],
+            capture_output=True,
+        )
+
+    def _itc_snapshot_rundir(self, issue_path, itc_dir):
+        """Copy rundir/ as the agent left it, before the official harness writes into it."""
+        snap = os.path.join(itc_dir, "rundir_agent")
+        if os.path.exists(snap):
+            shutil.rmtree(snap)
+        rundir = os.path.join(issue_path, "rundir")
+        if os.path.isdir(rundir):
+            shutil.copytree(rundir, snap, symlinks=True)
+        else:
+            os.makedirs(snap)
+        return snap
+
+    def _itc_restore_rundir(self, issue_path, snap):
+        """Put back the agent's rundir/, dropping what the official harness left there
+        (compiled testbench, waveforms, pytest cache with the test names), so a
+        harness-unaware agent learns about the harness only from the feedback."""
+        rundir = os.path.join(issue_path, "rundir")
+        os.makedirs(rundir, exist_ok=True)
+        self._itc_empty_dir(rundir)
+        leftover = os.listdir(rundir)
+        if leftover:
+            print(f"[ITC] could not clear {rundir}, still holds: {leftover[:10]}")
+        shutil.copytree(snap, rundir, symlinks=True, dirs_exist_ok=True)
+
+    def _itc_cumulative_patch(self, issue_path, before_dir, dir_names):
+        """Unified diff of the agent's work so far against the pre-agent snapshot."""
+        chunks = []
+        for d in dir_names:
+            if d == "rundir":
+                continue
+            orig_dir, mod_dir = os.path.join(before_dir, d), os.path.join(issue_path, d)
+            orig = set(self._get_files(orig_dir))
+            mod = set(self._get_files(mod_dir))
+            for rel in sorted(orig | mod):
+                def read(path):
+                    if not os.path.exists(path):
+                        return ""
+                    with open(path, "r", encoding="utf-8", errors="replace") as f:
+                        return f.read()
+                a, b = read(os.path.join(orig_dir, rel)), read(os.path.join(mod_dir, rel))
+                if a != b:
+                    chunks.append(self._diff(a, b, os.path.join(d, rel)))
+        return "\n\n".join(chunks)
+
+    def _itc_agent_loop(self, id, issue_path, before_dir, dir_names):
+        """Run the agent, grade it with the official harness and, while it fails,
+        resume the same agent session with the harness output.
+
+        Stops on pass, after ITC_MAX_ITERATIONS agent sessions, or when the harness
+        fails with the same error signature ITC_STALL_THRESHOLD times in a row.
+        Per-iteration artifacts go to reports/<n>_agent_iter<k>.txt,
+        reports/<harness log>_iter<k>.txt and harness/<n>/agent_changes_iter<k>.patch;
+        reports/<n>_agent.txt becomes all sessions concatenated, headed by the summed
+        usage so tools reading the first usage_summary line see the whole loop.
+        Returns (exit code of the last agent session, agent logfile).
+        """
+        issue_path = os.path.abspath(issue_path)
+        issue_id = os.path.basename(issue_path)
+        itc_dir = self._itc_dir(issue_path)
+        ctl_dir = os.path.join(itc_dir, "ctl")
+        if os.path.exists(itc_dir):
+            shutil.rmtree(itc_dir)
+        # Create them here: if docker created the mount points they would be owned by root
+        os.makedirs(os.path.join(itc_dir, "opencode-home"))
+        os.makedirs(ctl_dir)
+
+        repo = self.runs.get(id, {}).get('repo')
+        if repo is None:
+            logging.warning(f"[ITC] {id}: no prepared repository, running a single agent session")
+            return self.agent_run(issue_path, self.agent)
+
+        max_iter = max(1, config.get('ITC_MAX_ITERATIONS') or 10)
+        stall = max(1, config.get('ITC_STALL_THRESHOLD') or 3)
+        agent_timeout = config.get('ITC_AGENT_TIMEOUT') or 0
+        reports_dir = repo.report_path
+        # Harness unaware: the official harness writes into rundir/, which the agent
+        # container mounts, so its artifacts are dropped before the next session.
+        # Harness aware runs (src/ mounted) keep the previous behaviour.
+        isolate_rundir = not getattr(self, 'include_harness', False)
+
+        iterations, signatures = [], []
+        feedback, stop_reason, prev_patch = "", "max_iter", None
+        agent_status, agent_logfile = 1, os.path.join(reports_dir, f"{issue_id}_agent.txt")
+
+        for k in range(1, max_iter + 1):
+            with open(os.path.join(ctl_dir, "state.json"), "w") as f:
+                json.dump({
+                    "iteration": k,
+                    "max_iterations": max_iter,
+                    "category": self.context[id]['categories'][0],
+                    "harness_visible": bool(getattr(self, 'include_harness', False)),
+                    "agent_timeout": agent_timeout,
+                }, f)
+            with open(os.path.join(ctl_dir, "feedback.md"), "w") as f:
+                f.write(feedback)
+
+            print(f"[ITC] {id}: iteration {k}/{max_iter}, agent session")
+            start = time.time()
+            agent_status, agent_logfile = self.agent_run(issue_path, self.agent)
+            agent_time = time.time() - start
+
+            iter_log = os.path.join(reports_dir, f"{issue_id}_agent_iter{k}.txt")
+            if os.path.exists(agent_logfile):
+                shutil.copy2(agent_logfile, iter_log)
+            patch = self._itc_cumulative_patch(issue_path, before_dir, dir_names)
+            with open(os.path.join(issue_path, f"agent_changes_iter{k}.patch"), "w", encoding="utf-8") as f:
+                f.write(patch)
+
+            print(f"[ITC] {id}: iteration {k}/{max_iter}, official harness")
+            if isolate_rundir:
+                rundir_snap = self._itc_snapshot_rundir(issue_path, itc_dir)
+            repo.debug = self.debug
+            (tests, errors) = repo.obj()
+            for t in tests:
+                log = t.get("log")
+                if log and os.path.exists(log):
+                    root, ext = os.path.splitext(log)
+                    shutil.copy2(log, f"{root}_iter{k}{ext}")
+
+            failed = self._itc_failed_logs(tests)
+            passed = errors == 0 and not failed
+            signature = None if passed else self._itc_signature(failed)
+            usage = self._itc_usage(iter_log)
+            iterations.append({
+                "iteration": k,
+                "agent_status": agent_status,
+                "agent_time": round(agent_time, 1),
+                "harness_passed": passed,
+                "failed_tests": [name for name, _, _ in failed],
+                "signature": signature,
+                "patch_changed": patch != prev_patch,
+                "agent_log": iter_log,
+                **usage,
+            })
+            prev_patch = patch
+            print(f"[ITC] {id}: iteration {k}/{max_iter} -> {'PASS' if passed else 'FAIL ' + signature}")
+
+            if passed:
+                stop_reason = "pass"
+                break
+            signatures.append(signature)
+            if len(signatures) >= stall and len(set(signatures[-stall:])) == 1:
+                stop_reason = "stalled"
+                break
+            if isolate_rundir:
+                if k < max_iter:
+                    self._itc_restore_rundir(issue_path, rundir_snap)
+                feedback = self._itc_feedback(failed, k, max_iter)
+            else:
+                feedback = self._itc_feedback(failed, k, max_iter) + self._itc_shrink_waveforms(issue_path)
+
+        summary = {
+            "first_exit_pass": iterations[0]["harness_passed"],
+            "converged": stop_reason == "pass",
+            "iterations": len(iterations),
+            "stop_reason": stop_reason,
+            "rundir_isolated": isolate_rundir,
+            "history": iterations,
+        }
+        with open(os.path.join(itc_dir, "summary.json"), "w") as f:
+            json.dump(summary, f, indent=1)
+        self._itc_write_combined_log(agent_logfile, iterations, summary)
+        self.runs[id]['itc'] = summary
+        print(f"[ITC] {id}: stop={stop_reason} after {len(iterations)} iteration(s)")
+        return agent_status, agent_logfile
+
+    @staticmethod
+    def _itc_usage(logfile):
+        """Usage of one OpenCode session, from the wrapper's usage_summary line."""
+        usage = {}
+        if os.path.exists(logfile):
+            with open(logfile, "r", encoding="utf-8", errors="replace") as f:
+                m = ITC_USAGE_LINE.search(f.read())
+            if m:
+                usage = {k: float(v) if k == "cost_usd" else int(v) for k, v in m.groupdict().items()}
+        return usage
+
+    @staticmethod
+    def _itc_write_combined_log(agent_logfile, iterations, summary):
+        totals = {k: sum(it.get(k, 0) for it in iterations) for k in ITC_USAGE_KEYS}
+        with open(agent_logfile, "w", encoding="utf-8") as out:
+            out.write(
+                f"[itc] usage_summary cost_usd={totals['cost_usd']:.6f} "
+                f"prompt_tokens={totals['prompt_tokens']} completion_tokens={totals['completion_tokens']} "
+                f"cache_read_tokens={totals['cache_read_tokens']} cache_write_tokens={totals['cache_write_tokens']} "
+                f"reasoning_tokens={totals['reasoning_tokens']} "
+                f"total_tokens={totals['prompt_tokens'] + totals['completion_tokens']}\n")
+            out.write(f"[itc] stop_reason={summary['stop_reason']} iterations={summary['iterations']} "
+                      f"first_exit_pass={summary['first_exit_pass']} converged={summary['converged']}\n")
+            for it in iterations:
+                out.write(f"\n[itc] ===== iteration {it['iteration']} (harness "
+                          f"{'PASS' if it['harness_passed'] else 'FAIL'}) =====\n")
+                if os.path.exists(it['agent_log']):
+                    with open(it['agent_log'], "r", encoding="utf-8", errors="replace") as f:
+                        out.write(f.read())
 
     def all_agent(self):
         """

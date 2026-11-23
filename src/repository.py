@@ -74,6 +74,42 @@ def apply_template_substitution(content: str) -> str:
     return content
 
 
+def add_host_network_mode_to_docker_compose(content: str, harness_files: dict = None) -> str:
+    """
+    Set network_mode: host and mount Cadence tools on all services in a Docker Compose file.
+
+    Used for EDA verification containers that need to reach a license server
+    bound to localhost on the host machine (e.g. Cadence FlexLM on 127.0.0.1).
+    Host networking gives the container direct access to the host network stack,
+    making CDS_LIC_FILE=5280@localhost resolve correctly.
+
+    Cadence tools are mounted read-only from the host so the image stays small
+    and all tool libraries are available without baking them into the image.
+
+    With NEW_HARNESS, services whose cocotb runner already passes -timescale
+    (detected from harness_files) don't get the XRUNOPTS default timescale.
+    """
+    try:
+        data = yaml.safe_load(content)
+        if not data or 'services' not in data:
+            return content
+
+        from . import commercial_eda
+
+        new_harness = config.get('NEW_HARNESS') and harness_files
+        for service_config in data['services'].values():
+            default_timescale = not (new_harness and commercial_eda.harness_runner_sets_timescale(
+                service_config, harness_files))
+            commercial_eda.mount_cadence_tools_on_host_network(service_config, default_timescale)
+
+        data.pop('networks', None)
+        return yaml.dump(data, default_flow_style=False)
+
+    except Exception as e:
+        print(f"Warning: Failed to set host network mode in docker-compose YAML: {e}")
+        return content
+
+
 def add_license_network_to_docker_compose(content: str, license_network_name: str) -> str:
     """
     Add or update license network configuration in Docker Compose YAML content.
@@ -229,9 +265,12 @@ class Repository:
             
             # Add license network configuration for commercial EDA datapoints
             if self.requires_eda_license and file.endswith('docker-compose.yml'):
-                license_network_name = config.get('LICENSE_NETWORK')
-                if license_network_name:
-                    content = add_license_network_to_docker_compose(content, license_network_name)
+                # Use host networking so the container can reach the FlexLM license server
+                # bound to localhost (127.0.0.1) on the host machine.
+                content = add_host_network_mode_to_docker_compose(content, files)
+                # license_network_name = config.get('LICENSE_NETWORK')
+                # if license_network_name:
+                #     content = add_license_network_to_docker_compose(content, license_network_name)
                            
             # Filter out rundir volumes from docker-compose.yml
             if file.endswith('docker-compose.yml'):
@@ -262,7 +301,6 @@ class Repository:
                                     'external': True
                                 }
                             }
-
                         # Convert back to YAML
                         content = yaml.dump(data, default_flow_style=False)
                 except Exception as e:
@@ -318,6 +356,7 @@ class Repository:
 
         if out is not None:
             kargs['stdout'] = out
+            kargs['stderr'] = subprocess.STDOUT
 
         # Start the process
         p = subprocess.Popen(f"{cmd}", **kargs)
@@ -789,9 +828,9 @@ class Repository:
             script_file.write(f"GROUP_ID=$(id -g)\n\n")
             script_file.write(f"if [ \"$DEBUG_MODE\" = true ]; then\n")
             script_file.write(f"  echo \"DEBUG MODE: Starting container with bash entrypoint\"\n")
-            script_file.write(f"  docker compose -f {docker_compose_path} -p {project_name} run --rm --user $USER_ID:$GROUP_ID --entrypoint bash agent\n")
+            script_file.write(f"  docker compose -f {docker_compose_path} -p {project_name} run --rm --user $USER_ID:$GROUP_ID -e AGENT_LOG_FILE=/code/rundir/agent.log -e ERROR_LOG_FILE=/code/rundir/errorlog.txt --entrypoint bash agent\n")
             script_file.write(f"else\n")
-            script_file.write(f"  docker compose -f {docker_compose_path} -p {project_name} run --rm --user $USER_ID:$GROUP_ID agent\n")
+            script_file.write(f"  docker compose -f {docker_compose_path} -p {project_name} run --rm --user $USER_ID:$GROUP_ID -e AGENT_LOG_FILE=/code/rundir/agent.log -e ERROR_LOG_FILE=/code/rundir/errorlog.txt agent\n")
             script_file.write(f"fi\n")
             script_file.write(f"exit_code=$?\n\n")
             script_file.write(f"# Exit with the same code as the docker command\n")

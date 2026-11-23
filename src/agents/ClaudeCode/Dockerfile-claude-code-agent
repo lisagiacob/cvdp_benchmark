@@ -1,0 +1,37 @@
+# cvdp-agent-base:v1 or :v2 (cocotb version), see the agent's build_agent.sh
+ARG BASE_IMAGE=cvdp-agent-base
+FROM ${BASE_IMAGE}
+
+WORKDIR /app
+
+RUN mkdir -p /code && chmod 777 /code
+
+# Install Claude Code CLI. Recent releases require Node >= 22, while
+# cvdp-agent-base ships Node 20 (npm would silently fall back to an old CLI
+# that rejects newer models), so upgrade Node here first.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && node --version
+RUN npm install -g @anthropic-ai/claude-code@latest && claude --version
+
+# Install Google Cloud CLI (needed for gcloud-based Vertex auth fallback)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl apt-transport-https ca-certificates gnupg \
+    && curl https://packages.cloud.google.com/apt/doc/apt-key.gpg \
+        | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" \
+        > /etc/apt/sources.list.d/google-cloud-sdk.list \
+    && apt-get update && apt-get install -y google-cloud-cli \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/usr/lib/google-cloud-sdk/bin:${PATH}"
+ENV CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000
+
+# Install the Claude Code Python SDK
+RUN pip3.12 install --no-cache-dir claude-code-sdk
+
+# claude-code-agent.py is mounted at runtime by dataset_processor.py:
+#   src/agents/ -> /app/
+# so the script is available at /app/ClaudeCode/claude-code-agent.py
+
+ENV PYTHONUNBUFFERED=1

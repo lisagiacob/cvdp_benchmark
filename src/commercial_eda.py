@@ -10,6 +10,7 @@ for commercial EDA tools like Cadence, Synopsys, and other verification platform
 
 import json
 import logging
+import re
 import subprocess
 from typing import Set, List, Optional, Dict, Any
 
@@ -17,6 +18,12 @@ from .config_manager import config
 from .constants import VERIF_EDA_CATEGORIES, LICENSE_CONFIG
 
 logger = logging.getLogger(__name__)
+
+# Default timescale for modules without a `timescale directive (only applies to those)
+XRUN_DEFAULT_TIMESCALE_OPTS = '-timescale 1ns/1ps'
+
+# A `timescale=(...)` keyword argument, e.g. in runner.build(), outside comments
+_RUNNER_TIMESCALE_RE = re.compile(r'^[^#\n]*\btimescale\s*=\s*\(', re.MULTILINE)
 
 
 def check_docker_network_exists(network_name: str) -> bool:
@@ -222,6 +229,129 @@ def datapoint_requires_eda_license(datapoint: Dict[str, Any]) -> bool:
         # If we can't determine, err on the side of caution and return False
         logger.warning(f"Could not determine EDA license requirement for datapoint: {e}")
         return False
+
+
+def harness_runner_sets_timescale(service_config: Dict[str, Any], harness_files: Dict[str, str]) -> bool:
+    """
+    Tell whether a harness service runs a cocotb runner that is given a timescale.
+
+    With cocotb 2 (NEW_HARNESS), Runner.build(timescale=...) passes -timescale to
+    xrun itself; adding the XRUNOPTS default on top makes xrun fail with OPTNOML
+    ("Multiple -timescale option specified"). cocotb 1.x ignored that argument on
+    Xcelium, which is why the old harness relies on XRUNOPTS. The runner call may
+    live in any harness Python file (often harness_library.py), so all are scanned.
+
+    Args:
+        service_config: Docker Compose service dictionary
+        harness_files: Harness files of the datapoint, {path: content}
+
+    Returns:
+        True if the service runs a cocotb runner built with a timescale
+    """
+    if 'process.py' in str(service_config.get('command', '')):
+        return False
+    sources = [content for path, content in harness_files.items() if path.endswith('.py')]
+    return (any('get_runner' in content for content in sources)
+            and any(_RUNNER_TIMESCALE_RE.search(content) for content in sources))
+
+
+def mount_cadence_tools_on_host_network(service_config: Dict[str, Any],
+                                        default_timescale: bool = True) -> None:
+    """
+    Set network_mode: host and mount the Cadence tools read-only on one Docker Compose service.
+
+    Host networking is needed to reach the FlexLM license server bound to
+    localhost on the host machine (CDS_LIC_FILE=5280@localhost).
+
+    XRUNOPTS gives xrun a default timescale: otherwise elaboration fails with
+    CUMSTS when a testbench declares `timescale and the reference RTL doesn't.
+    Skip it (default_timescale=False) when something else already passes
+    -timescale, see harness_runner_sets_timescale().
+
+    Args:
+        service_config: Docker Compose service dictionary, modified in place
+        default_timescale: Whether to set the XRUNOPTS default timescale
+    """
+    service_config.pop('networks', None)
+    service_config['network_mode'] = 'host'
+
+    volumes = service_config.get('volumes', [])
+    for tool_path in (config.get('CDS_XCELIUM'), config.get('CDS_VMANAGER')):
+        if tool_path:
+            volumes.append(f'{tool_path}:{tool_path}:ro')
+    service_config['volumes'] = volumes
+
+    if not default_timescale:
+        return
+
+    # Compose accepts environment as a mapping or as a list of KEY=VALUE strings
+    environment = service_config.get('environment') or {}
+    if isinstance(environment, list):
+        if not any(entry.startswith('XRUNOPTS=') for entry in environment):
+            environment.append(f'XRUNOPTS={XRUN_DEFAULT_TIMESCALE_OPTS}')
+    else:
+        environment.setdefault('XRUNOPTS', XRUN_DEFAULT_TIMESCALE_OPTS)
+    service_config['environment'] = environment
+
+
+def _get_image_path_env(image_name: str) -> str:
+    """
+    Return the PATH baked into a Docker image, falling back to the Debian default.
+
+    Args:
+        image_name: Name of the Docker image to inspect
+
+    Returns:
+        The image's PATH value
+    """
+    default_path = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    try:
+        result = subprocess.run(
+            ["docker", "image", "inspect", "--format", "{{json .Config.Env}}", image_name],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        for entry in json.loads(result.stdout) or []:
+            if entry.startswith("PATH="):
+                return entry[len("PATH="):]
+    except Exception as e:
+        logger.warning(f"Could not read PATH from image {image_name}, using default: {e}")
+    return default_path
+
+
+def expose_cadence_tools_to_agent(service_config: Dict[str, Any], image_name: str) -> None:
+    """
+    Make Xcelium/Vmanager usable inside an agent Docker Compose service.
+
+    Agent images don't ship the Cadence environment, so on top of the host
+    network and mounts used by the harness this sets the same variables as
+    docker/Dockerfile-cadence-verif. PATH is the image's own PATH with the
+    Cadence bin directories appended, since setting it in Compose replaces it.
+
+    Args:
+        service_config: Docker Compose agent service dictionary, modified in place
+        image_name: Agent Docker image, used to read its PATH
+    """
+    mount_cadence_tools_on_host_network(service_config)
+
+    environment = service_config.setdefault('environment', {})
+    bin_dirs = []
+
+    xcelium_path = config.get('CDS_XCELIUM')
+    if xcelium_path:
+        environment['CDS_XCELIUM'] = xcelium_path
+        bin_dirs += [f'{xcelium_path}/bin', f'{xcelium_path}/tools/bin/64bit', f'{xcelium_path}/tools/bin']
+
+    vmanager_path = config.get('CDS_VMANAGER')
+    if vmanager_path:
+        environment['CDS_VMANAGER'] = vmanager_path
+        bin_dirs.append(f'{vmanager_path}/bin')
+
+    environment['PATH'] = ':'.join([_get_image_path_env(image_name)] + bin_dirs)
+    environment['CDS_LIC_FILE'] = '5280@localhost'
+    environment['LM_LICENSE_FILE'] = '5280@localhost'
+    environment['CDS_SKIP_OS_CHECK_ON_STARTUP'] = '1'
 
 
 def _scan_for_eda_template_variables(dataset_file: str) -> bool:
