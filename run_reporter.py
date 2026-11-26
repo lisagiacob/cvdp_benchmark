@@ -68,9 +68,16 @@ def extract_problem_id_from_test_id(test_id: str) -> str:
     """
     if "." not in test_id:
         return test_id
-    
-    # Split from right side only once - everything before the last dot is the problem ID
-    return test_id.rsplit(".", 1)[0]
+
+    # Split from right side only once
+    potential_id, suffix = test_id.rsplit(".", 1)
+
+    # Only strip the suffix if it looks like a test suffix (pure digits or 'test' + digits).
+    # Otherwise the dot is part of the problem name itself (e.g., H.264), so return the full string.
+    import re
+    if re.match(r'^(test)?\d+$', suffix):
+        return potential_id
+    return test_id
 
 def is_category_score_based(category_id: str) -> bool:
     """
@@ -191,8 +198,8 @@ class ResultParser:
     def _parse_standard_results(self) -> None:
         """Parse standard (non-composite) results."""
         for cid, results in self.raw_results.items():
-            # Skip the test_details and metadata sections - they're not categories
-            if cid in ['test_details', 'metadata']:
+            # Skip non-category sections.
+            if cid in ['test_details', 'metadata', 'agent_details']:
                 continue
                 
             # Create CategoryStats if it doesn't exist yet
@@ -313,7 +320,7 @@ class ResultParser:
         # First, find all unique problems and their metadata
         for sample in samples:
             for category, cat_data in sample.items():
-                if category in ["metadata", "sample_index", "test_details"]:
+                if category in ["metadata", "sample_index", "test_details", "agent_details"]:
                     continue
                     
                 # Get log entries, if any
@@ -467,7 +474,7 @@ class ResultParser:
             total_problems = 0
             
             for category, cat_data in sample.items():
-                if category in ["metadata", "sample_index", "test_details"]:
+                if category in ["metadata", "sample_index", "test_details", "agent_details"]:
                     continue
                 
                 # Check if this is a score-based category
@@ -834,7 +841,7 @@ class ResultParser:
             passed_problems = 0
             
             for cid, results in sample.items():
-                if cid in ['metadata', 'sample_index', 'test_details']:
+                if cid in ['metadata', 'sample_index', 'test_details', 'agent_details']:
                     continue
                     
                 for difficulty in ['easy', 'medium', 'hard']:
@@ -913,7 +920,7 @@ class ResultParser:
             category_difficulty_stats = defaultdict(lambda: defaultdict(lambda: {'total': 0, 'passed': 0}))
             
             for cid, results in sample.items():
-                if cid in ['metadata', 'sample_index', 'test_details']:
+                if cid in ['metadata', 'sample_index', 'test_details', 'agent_details']:
                     continue
                     
                 for difficulty in ['easy', 'medium', 'hard']:
@@ -1580,7 +1587,7 @@ class ResultParser:
         failing_tests = []
         
         for test_id, results in self.raw_results.items():
-            if test_id in ['test_details', 'metadata']:
+            if test_id in ['test_details', 'metadata', 'agent_details']:
                 continue
                 
             if 'tests' in results:
@@ -1621,7 +1628,7 @@ class ResultParser:
         passing_tests = []
         
         for test_id, results in self.raw_results.items():
-            if test_id in ['test_details', 'metadata']:
+            if test_id in ['test_details', 'metadata', 'agent_details']:
                 continue
                 
             if 'tests' in results:
@@ -1750,7 +1757,7 @@ class ResultParser:
         
         # Additionally, scan through the raw results to find problems explicitly marked as passed
         for cid, results in self.raw_results.items():
-            if cid in ['test_details', 'metadata']:
+            if cid in ['test_details', 'metadata', 'agent_details']:
                 continue
                 
             for difficulty in ['easy', 'medium', 'hard']:
@@ -1986,4 +1993,4 @@ def main():
             json.dump(result_parser.raw_results, f, indent=2)
 
 if __name__ == '__main__':
-    main() 
+    main()

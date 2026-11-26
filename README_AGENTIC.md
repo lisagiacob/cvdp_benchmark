@@ -70,10 +70,10 @@ python run_benchmark.py -f dataset.jsonl -l -g my-agent
 
 ### Recommended Base Images for Agents
 
-**`ghcr.io/hdl/sim/osvb`** - Open Source Verification Base Image:
+**`nvidia/cvdp-sim:v1.0.0`** - CVDP v1.1.0 Open-Source Simulation Image:
 ```dockerfile
-# Use osvb as base for agents that need EDA tools
-FROM ghcr.io/hdl/sim/osvb
+# Use the CVDP simulation image as a base for agents that need open-source EDA tools
+FROM nvidia/cvdp-sim:v1.0.0
 WORKDIR /app
 
 # Install your agent dependencies
@@ -83,11 +83,10 @@ RUN pip install -r requirements.txt
 ENTRYPOINT ["python", "agent.py"]
 ```
 
-**Available Tools in osvb:**
+**Available Tools in `nvidia/cvdp-sim:v1.0.0`:**
 - **Icarus Verilog** - Open-source Verilog simulator
 - **Verilator** - Fast Verilog simulator and lint tool
 - **Yosys** - Open-source synthesis suite
-- **GTKWave** - Waveform viewer
 - **Standard build tools** (make, gcc, python, etc.)
 
 ### Advanced Verification Environment
@@ -109,15 +108,15 @@ python run_benchmark.py -f dv_dataset.jsonl -l -g my-agent
 
 | Image Type | Icarus | Verilator | Yosys | Xcelium | Code Coverage | Assertions |
 |------------|--------|-----------|--------|---------|---------------|------------|
-| **osvb** | ✅ | ✅ | ✅ | ❌ | Basic | Basic |
+| **nvidia/cvdp-sim:v1.0.0** | ✅ | ✅ | ✅ | ❌ | Basic | Basic |
 | **VERIF_EDA_IMAGE** | ✅ | ✅ | ✅ | ✅ | Advanced | Advanced |
 
 ### Usage Guidelines
 
 **For Basic RTL Development:**
 ```dockerfile
-# Use osvb for most verification tasks
-FROM ghcr.io/hdl/sim/osvb
+# Use the CVDP simulation image for open-source verification tasks
+FROM nvidia/cvdp-sim:v1.0.0
 # Your agent implementation
 ```
 
@@ -134,7 +133,7 @@ export VERIF_EDA_IMAGE=your-registry/cadence-tools:latest
 ```
 
 **Test Harness Considerations:**
-- **Default**: `ghcr.io/hdl/sim/osv` (note: different from osvb) is commonly used for test harness execution
+- **Default**: CVDP v1.1.0 test harnesses use `nvidia/cvdp-sim:v1.0.0` through `OSS_SIM_IMAGE`
 - **Advanced DV**: `VERIF_EDA_IMAGE` is automatically used when required by specific dataset categories
 - **Tool Consistency**: Both agent and test harness should have compatible tool environments
 
@@ -198,6 +197,18 @@ services:
       - ./prompt.json:/code/prompt.json
     working_dir: /code
 ```
+
+The runner is agent-neutral and only passes host auth or host files when the user requests it for that run. Use `CVDP_AGENT_ENV` to name host environment variables that should be forwarded into the agent container, and use `CVDP_AGENT_MOUNTS` for semicolon-separated `source:target[:mode]` host mounts:
+
+```bash
+export CVDP_AGENT_ENV=MY_AGENT_API_KEY,MY_AGENT_MODEL
+export CVDP_AGENT_MOUNTS="$HOME/.my-agent/auth.json:/auth/auth.json:ro"
+python run_benchmark.py -f dataset.jsonl -l -g my-agent-image
+```
+
+Agent-specific auth recipes should live with the agent example. For example, a Claude agent can document how to pass `ANTHROPIC_API_KEY`, while another agent can document its own token or host-login file layout without adding policy to the benchmark runner.
+
+For traditional directory-backed datapoints, the runner exposes and accepts changes under project workspace roots discovered from the generated harness directory. Benchmark infrastructure such as `prompt.json`, Dockerfiles, generated compose/scripts, `before/`, `src/`, and `rundir/` remains protected or ignored. Set `CVDP_AGENT_WORKSPACE_ROOTS` to a comma-separated list to override the discovered project roots for custom layouts.
 
 ### Docker Compose for Test Harness
 

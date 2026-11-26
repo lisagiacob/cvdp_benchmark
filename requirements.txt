@@ -9,6 +9,7 @@ tabulate
 numpy
 colorama
 ruamel.yaml
+tiktoken
 # Non-agentic Claude / Gemini wrappers (src/llm_models/, loaded via CUSTOM_MODEL_FACTORY)
 anthropic
 google-genai

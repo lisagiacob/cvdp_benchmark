@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -124,9 +124,11 @@ class ConfigManager:
                            description="Default model to use when none is specified")
         self.register_config("CUSTOM_MODEL_FACTORY", required=False,
                            description="Path to custom model factory implementation")
+        self.register_config("CVDP_HEAVY_REPOS_PATH", required=False,
+                           description="Path to directory containing cvdp_agentic_heavy_* local git repos or .bundle files")
         
         # Docker and Resource Management
-        self.register_config("DOCKER_QUOTA_THRESHOLD_MB", default=50, type_cast=int,
+        self.register_config("DOCKER_QUOTA_THRESHOLD_MB", default=200, type_cast=int,
                            description="Docker quota threshold in MB")
         self.register_config("DOCKER_QUOTA_CHECK_INTERVAL", default=1, type_cast=int,
                            description="Docker quota check interval in seconds")
@@ -140,9 +142,9 @@ class ConfigManager:
                            description="Docker network name for EDA license server connectivity")
         self.register_config("LICENSE_NETWORK_AUTO_CREATE", default=True, type_cast=bool,
                            description="Automatically create license network if it doesn't exist")
-        self.register_config("OSS_SIM_IMAGE", default="ghcr.io/hdl/sim/osvb", type_cast=str,
+        self.register_config("OSS_SIM_IMAGE", default="nvidia/cvdp-sim:v1.0.0", type_cast=str,
                            description="Docker image for simulation tasks with open-source EDA tools")
-        self.register_config("OSS_PNR_IMAGE", default="ghcr.io/hdl/impl/pnr", type_cast=str,
+        self.register_config("OSS_PNR_IMAGE", default="nvidia/cvdp-sim:v1.0.0", type_cast=str,
                            description="Docker image for place-and-route tasks with open-source EDA tools")
         self.register_config("CDS_XCELIUM", default="/space/tools/cadence/2025-26/RHELx86/XCELIUM_25.03.006", type_cast=str,
                            description="Host path to Xcelium installation, mounted read-only into EDA containers")

@@ -9,6 +9,7 @@ import yaml
 import psutil
 from src import subjective
 from src import network_util
+from src import git_utils
 import dotenv
 from src.dir_monitor import DirectorySizeMonitor
 from src.config_manager import config
@@ -48,7 +49,7 @@ def apply_template_substitution(content: str) -> str:
     
     Replaces placeholders in the format __VARIABLE__ with configured values:
     - __VERIF_EDA_IMAGE__ -> VERIF_EDA_IMAGE config value
-    - __LICENSE_NETWORK__ -> LICENSE_NETWORK config value  
+    - __LICENSE_NETWORK__ -> LICENSE_NETWORK config value
     - __OSS_SIM_IMAGE__ -> OSS_SIM_IMAGE config value
     - __OSS_PNR_IMAGE__ -> OSS_PNR_IMAGE config value
     
@@ -63,10 +64,12 @@ def apply_template_substitution(content: str) -> str:
         '__VERIF_EDA_IMAGE__': config.get('VERIF_EDA_IMAGE'),
         '__LICENSE_NETWORK__': config.get('LICENSE_NETWORK'),
         '__OSS_SIM_IMAGE__': config.get('OSS_SIM_IMAGE'),
-        '__OSS_PNR_IMAGE__': config.get('OSS_PNR_IMAGE')
+        '__OSS_PNR_IMAGE__': config.get('OSS_PNR_IMAGE'),
     }
     
     # Apply substitutions for any placeholders found
+    if content is None:
+        return content
     for placeholder, value in substitutions.items():
         if value and placeholder in content:
             content = content.replace(placeholder, value)
@@ -432,6 +435,9 @@ class Repository:
         # Extract project name prefix for filtering (remove timestamp)
         project_prefix = "_".join(project_name.split("_")[:-1])
 
+        harness_home = "/rundir" if "-w /rundir" in cmd else "/code/rundir"
+        harness_env = f"-e HOME={harness_home} -e XDG_CACHE_HOME={harness_home}/.cache"
+
         # Create the docker command with project name
         # line_cmd = f"docker compose -f {docker} -p {project_name} run {cmd} {service}"
         kill_cmd = f"docker compose -f {docker} -p {project_name} kill {service}"
@@ -499,9 +505,9 @@ class Repository:
             script_file.write(f"GROUP_ID=$(id -g)\n\n")
             script_file.write(f"if [ \"$DEBUG_MODE\" = true ]; then\n")
             script_file.write(f"  echo \"DEBUG MODE: Starting container with bash entrypoint\"\n")
-            script_file.write(f"  docker compose -f {docker} -p {project_name} run --rm --user $USER_ID:$GROUP_ID -e HOME=/code/rundir --entrypoint bash {cmd} {service}\n")
+            script_file.write(f"  docker compose -f {docker} -p {project_name} run --rm --user $USER_ID:$GROUP_ID {harness_env} --entrypoint bash {cmd} {service}\n")
             script_file.write(f"else\n")
-            script_file.write(f"  docker compose -f {docker} -p {project_name} run --rm --user $USER_ID:$GROUP_ID -e HOME=/code/rundir {cmd} {service}\n")
+            script_file.write(f"  docker compose -f {docker} -p {project_name} run --rm --user $USER_ID:$GROUP_ID {harness_env} {cmd} {service}\n")
             script_file.write(f"fi\n")
             script_file.write(f"exit_code=$?\n\n")
             script_file.write(f"# Exit with the same code as the docker command\n")
@@ -584,28 +590,22 @@ class Repository:
             
             if repo_url and commit_hash:
                 # Find existing git cache mirror
+                # Compute the repo hash at generation time so the script points
+                # directly at the same mirror path used by GitRepositoryManager.
+                mirror_filename = git_utils.get_repo_mirror_filename(repo_url)
+
                 script_file.write("# Look for existing git cache mirror\n")
                 script_file.write("SCRIPT_DIR=\"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")\" && pwd)\"\n")
                 script_file.write("WORK_DIR=\"$(dirname \"$(dirname \"$(dirname \"$SCRIPT_DIR\")\")\")\"  # Go up to work directory\n")
                 script_file.write("GIT_CACHE_DIR=\"$WORK_DIR/git_cache/mirrors\"\n")
-                script_file.write("MIRROR_DIR=\"\"\n\n")
-                
-                script_file.write("# Find the mirror directory (should be named with repo hash)\n")
-                script_file.write("if [ -d \"$GIT_CACHE_DIR\" ]; then\n")
-                script_file.write("  for mirror in \"$GIT_CACHE_DIR\"/*.git; do\n")
-                script_file.write("    if [ -d \"$mirror\" ]; then\n")
-                script_file.write("      MIRROR_DIR=\"$mirror\"\n")
-                script_file.write("      echo \"Found git cache mirror: $MIRROR_DIR\"\n")
-                script_file.write("      break\n")
-                script_file.write("    fi\n")
-                script_file.write("  done\n")
-                script_file.write("fi\n\n")
-                
-                script_file.write("if [ -z \"$MIRROR_DIR\" ]; then\n")
-                script_file.write("  echo \"ERROR: No git cache mirror found in $GIT_CACHE_DIR\"\n")
+                script_file.write(f"MIRROR_DIR=\"$GIT_CACHE_DIR/{mirror_filename}\"\n\n")
+
+                script_file.write("if [ ! -d \"$MIRROR_DIR\" ]; then\n")
+                script_file.write("  echo \"ERROR: Expected git cache mirror not found: $MIRROR_DIR\"\n")
                 script_file.write("  echo \"Please run the benchmark with -l -g first to create the git cache.\"\n")
                 script_file.write("  exit 1\n")
-                script_file.write("fi\n\n")
+                script_file.write("fi\n")
+                script_file.write("echo \"Found git cache mirror: $MIRROR_DIR\"\n\n")
                 
                 # Ensure patch_image exists
                 script_file.write("# Ensure patch_image Docker image exists\n")
@@ -633,6 +633,8 @@ class Repository:
                 script_file.write("cat > \"$PATCH_DIR/patch.diff\" << 'PATCH_EOF'\n")
                 if patches:
                     for file_path, patch_body in patches.items():
+                        if not patch_body or not patch_body.strip():
+                            continue
                         # Use same format as GitRepositoryManager: add proper headers
                         filename = f"{root_dir}/{file_path}" if root_dir else file_path
                         script_file.write(f"--- a/{filename}\n")
@@ -729,13 +731,14 @@ class Repository:
         print(f"[INFO]   Create: {create_script_path}")
         print(f"[INFO]   Destroy: {destroy_script_path}")
 
-    def create_agent_script(self, docker_compose_path, agent_image=None):
+    def create_agent_script(self, docker_compose_path, agent_image=None, project_name=None):
         """
         Creates a run_docker_agent.sh script to run the agent in a Docker container.
         
         Args:
             docker_compose_path (str): Path to the docker-compose-agent.yml file
             agent_image (str, optional): Docker image to use for the agent
+            project_name (str, optional): Docker Compose project name to use.
         """
         # Ensure docker_compose_path is absolute
         docker_compose_path = os.path.abspath(docker_compose_path)
@@ -750,8 +753,9 @@ class Repository:
         if not formatted_repo[0].isalnum():
             formatted_repo = 'p' + formatted_repo
         
-        # Create project name with formatted repo name - using bash command for timestamp
-        project_name = f"agent_{formatted_repo}_{self.id}_$(date +%s)"
+        # Create project name with formatted repo name.
+        if project_name is None:
+            project_name = f"agent_{formatted_repo}_{self.id}_$(date +%s)"
         
         # Extract project name prefix for filtering (remove timestamp part)
         project_prefix = f"agent_{formatted_repo}_{self.id}"
@@ -865,23 +869,32 @@ class Repository:
         start_time = time.time()
         result = []
         err = 0
-        logfile = ""
+        logfile = self.logfile or ""
+        res = f"Reference:\n{reference}\n\nResponse:\n{response}\n"
 
         try:
             # LLM-based subjective scoring if model is provided and it is LLM subjective categories
             if self.sbj_llm_model and category not in BLEU_SCORING_CATEGORIES:
-                # Run LLM-based subjective scoring
-                llm_score = self.subjective_score(response, reference, problem_prompt)
+                # Run LLM-based subjective scoring; returns (score, reasoning) tuple
+                llm_score, llm_reasoning = self.subjective_score(response, reference, problem_prompt)
                 llm_time = time.time()
-                llm_pass = llm_score >= self.llm_score_th
 
-                err = (not llm_pass)
-                if logfile != "":
-                    # LLM Score Logfile
-                    with open(f"{logfile}_llm_score.txt", 'w+') as out:
-                        out.write(res + f"\n\nLLM Score (0-1) : {llm_score}\n")
-
-                result.append({"result": err, "log": f"{logfile}_llm_score.txt", "error_msg": None, "execution": llm_time - start_time, "llm_score": llm_score})
+                if llm_score is None:
+                    # Scoring failed (API error, parse error, etc.) — record as error, not a 0 score
+                    err = 1
+                    error_msg = "LLM subjective scoring failed (API or parse error)"
+                    if logfile != "":
+                        with open(f"{logfile}_llm_score.txt", 'w+') as out:
+                            out.write(res + f"\n\nLLM Score: ERROR\nReason: {llm_reasoning}\n")
+                    result.append({"result": err, "log": f"{logfile}_llm_score.txt", "error_msg": error_msg, "execution": llm_time - start_time, "llm_score": None})
+                else:
+                    llm_pass = llm_score >= self.llm_score_th
+                    err = (not llm_pass)
+                    if logfile != "":
+                        # LLM Score Logfile
+                        with open(f"{logfile}_llm_score.txt", 'w+') as out:
+                            out.write(res + f"\n\nLLM Score (0-1) : {llm_score}\nReasoning: {llm_reasoning}\n")
+                    result.append({"result": err, "log": f"{logfile}_llm_score.txt", "error_msg": None, "execution": llm_time - start_time, "llm_score": llm_score})
             else:
                 # Traditional metrics - ROUGE and BLEU
                 rouge = subjective.calculate_ROUGE(response, reference, self.n_gram)
@@ -933,14 +946,15 @@ class Repository:
             float: A normalized score from 0.0-1.0 where 1.0 is perfect match and 0.0 is no match
         """
         try:
-            # Use the model provided during initialization
-            # if self.sbj_llm_model is not None:
-            # Call the subjective_score method on the model
-            score = self.sbj_llm_model.subjective_score(response, reference, problem_prompt)
-            
+            # Call the subjective_score method on the model; returns (score, reasoning) tuple
+            score, reasoning = self.sbj_llm_model.subjective_score(response, reference, problem_prompt)
+
             if self.debug:
-                print(f"LLM-based subjective score: {score}/1.0 (threshold: {self.llm_score_th})")
-            return score
+                if score is None:
+                    print(f"LLM-based subjective score: ERROR (threshold: {self.llm_score_th})")
+                else:
+                    print(f"LLM-based subjective score: {score}/1.0 (threshold: {self.llm_score_th})")
+            return score, reasoning
             # else:
             #     # No model available - use fallback scoring method
             #     print("Warning: No LLM model provided for subjective scoring. Using fallback method.")
@@ -963,8 +977,7 @@ class Repository:
                 
         except Exception as e:
             print(f"Error in LLM subjective scoring: {str(e)}")
-            # Return middle score on error to avoid failing the test completely
-            return 0.0
+            return None, str(e)
 
     def obj_harness(self, issue_path : str = "", logfile : str = "", uut : str = None):
 
