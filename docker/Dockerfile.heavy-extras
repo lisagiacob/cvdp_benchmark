@@ -4,6 +4,9 @@
 #   aes           cheriot-ibex_0003/0007, caliptra-rtl_0002, enso_0109,
 #                 verilog_axi_0007 (imported by their harness_library.py)
 #   cocotbext-axi verilog_axi_0001
+#   coverage      cheriot-ibex_0003/0007: their .env sets COVERAGE=False, which
+#                 cocotb 2 treats as "collect coverage" (any value) and aborts
+#                 the simulation if the module is missing. 7.10.7 = last for py3.9
 #   clang         Verilator in the osvb base is configured with CXX=clang++
 #                 but ships no C++ compiler: needed by the SIM=verilator
 #                 harnesses (cheriot-ibex, cva6_riscv_core, i2c_0007)
