@@ -48,6 +48,17 @@ V110_TARGETS := opencode-v110 claude-v110 codex-v110 \
 	opencode-v110-ba-toconv opencode-v110-commercial-ba-toconv \
 	opencode-v110-bu-toconv opencode-v110-commercial-bu-toconv \
 	opencode-v110-nonagentic-bu-toconv opencode-v110-nonagentic-commercial-bu-toconv
+# CVDP v1.1.0 context-heavy agentic: each datapoint is a task on a real git repo,
+# checked out from the HF bundles in HEAVY_REPOS (CVDP_HEAVY_REPOS_PATH). Agentic
+# only, cocotb 2 like the other v1.1.0 targets. Override the bundle dir with
+# HEAVY_REPOS=<dir> on the command line.
+HEAVY_NOCOMM := dataset/cvdp_v1.1.0_agentic_heavy_code_generation_no_commercial.jsonl
+HEAVY_COMM := dataset/cvdp_v1.1.0_agentic_heavy_code_generation_commercial.jsonl
+HEAVY_REPOS ?= $(abspath $(CURDIR)/../cvdp_v1.1.0_agentic_heavy_code_generation_public)
+HEAVY_TARGETS := opencode-heavy claude-heavy codex-heavy \
+	opencode-heavy-commercial claude-heavy-commercial codex-heavy-commercial
+V110_TARGETS += $(HEAVY_TARGETS)
+$(HEAVY_TARGETS): export CVDP_HEAVY_REPOS_PATH = $(HEAVY_REPOS)
 BENCH_TARGETS := $(COCOV1_TARGETS) $(COCOV2_TARGETS) $(V110_TARGETS) \
 	opencode-commercial claude-commercial codex-commercial \
 	opencode-commercial-eda claude-commercial-eda codex-commercial-eda \
@@ -295,6 +306,35 @@ codex-v110-commercial-eda:
 
 codex-v110-commercial-ba:
 	$(call run_and_notify,$(RUN) run_benchmark.py -f $(V110_COMM) -l -g codex-agent:v2 --force-agentic-include-harness --agent-include-eda,codex-v110-commercial-ba)
+
+# ------------------------------ HEAVY AGENTIC (v1.1.0) ------------------------------
+# Needs the bundles from HF in HEAVY_REPOS (default ../cvdp_v1.1.0_agentic_heavy_code_generation_public).
+# One datapoint only: DP=<id>, e.g. make claude-heavy DP=cvdp_agentic_heavy_rvx_0004
+.PHONY: $(HEAVY_TARGETS) heavy-check
+HEAVY_DP = $(if $(DP),-i $(DP))
+
+heavy-check:
+	@if [ ! -d "$(HEAVY_REPOS)" ] || [ -z "$$(ls "$(HEAVY_REPOS)"/*.bundle 2>/dev/null)" ]; then \
+		echo "Error: no .bundle files in $(HEAVY_REPOS). Download them from HF or pass HEAVY_REPOS=<dir>." >&2; exit 1; \
+	fi
+
+opencode-heavy: heavy-check
+	$(call run_and_notify,$(RUN) run_benchmark.py -f $(HEAVY_NOCOMM) -l -g cvdp-opencode-agent:v2 $(HEAVY_DP),opencode-heavy)
+
+claude-heavy: heavy-check
+	$(call run_and_notify,$(RUN) run_benchmark.py -f $(HEAVY_NOCOMM) -l -g claude-code-agent:v2 $(HEAVY_DP),claude-heavy)
+
+codex-heavy: heavy-check
+	$(call run_and_notify,$(RUN) run_benchmark.py -f $(HEAVY_NOCOMM) -l -g codex-agent:v2 $(HEAVY_DP),codex-heavy)
+
+opencode-heavy-commercial: heavy-check
+	$(call run_and_notify,$(RUN) run_benchmark.py -f $(HEAVY_COMM) -l -g cvdp-opencode-agent:v2 $(HEAVY_DP),opencode-heavy-commercial)
+
+claude-heavy-commercial: heavy-check
+	$(call run_and_notify,$(RUN) run_benchmark.py -f $(HEAVY_COMM) -l -g claude-code-agent:v2 $(HEAVY_DP),claude-heavy-commercial)
+
+codex-heavy-commercial: heavy-check
+	$(call run_and_notify,$(RUN) run_benchmark.py -f $(HEAVY_COMM) -l -g codex-agent:v2 $(HEAVY_DP),codex-heavy-commercial)
 
 # ----------------------------- HARNESS RERUN (v1.1.0) ------------------------------
 # Re-grades the agent output of a finished v1.0.2 run with the v1.1.0 harness,

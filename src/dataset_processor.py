@@ -1069,55 +1069,12 @@ class DatasetProcessor():
                 model = model
             )
 
-            agent_logfile = self.runs[id].get('agent_logfile', "")
-            # With --iter-to-convergence the log holds every session: an earlier
-            # session's timeout is not the outcome of the datapoint
+            # With --iter-to-convergence, attach the loop summary to the result
             itc = self.runs[id].get('itc')
             if itc:
                 res['itc'] = itc
 
-            if agent_logfile and os.path.exists(agent_logfile):
-                with open(agent_logfile, "r") as f:
-                    agent_log_content = f.read()
-
-                agent_log_lower = agent_log_content.lower()
-
-                if not itc and (
-                    "agent process exited" in agent_log_lower
-                    or "opencode cli failed" in agent_log_lower
-                    or "codex cli failed" in agent_log_lower
-                    or "timed out" in agent_log_lower
-                ):
-                    self.runs[id]['agent_error'] = agent_log_content
-                else:
-                    self.runs[id].pop('agent_error', None)
-            
-            # If there was an agent error, add it to the result
-            if self.runs[id].get('agent_error', '').strip():
-                if 'tests' in res:
-                    # Add agent error to test results if not already present
-                    agent_error_found = False
-                    for test in res['tests']:
-                        if 'error_msg' in test and test['error_msg'] and 'agent_error' in test['error_msg']:
-                            agent_error_found = True
-                            break
-                    
-                    if not agent_error_found:
-                        # Include agent logfile if available
-                        agent_logfile = self.runs[id].get('agent_logfile', None)
-                        res['tests'].append({
-                            "result": 1,
-                            "log": agent_logfile, 
-                            "error_msg": f"Agent error: {self.runs[id]['agent_error']}",
-                            "execution": 0.0
-                        })
-                        res['errors'] += 1
-            
-            # Add agent logfile to result metadata if available
-            if id in self.runs and 'agent_logfile' in self.runs[id]:
-                res['agent_logfile'] = self.runs[id]['agent_logfile']
-
-            # Add agent status/returncode/execution metadata (upstream)
+            # Add agent metadata without changing harness test counts.
             self._copy_agent_metadata_to_result(id, res)
 
             q.put({id: res})
@@ -1139,23 +1096,8 @@ class DatasetProcessor():
                 "errors": 1
             }
 
-            # Add agent error if there was one
-            if id in self.runs and 'agent_error' in self.runs[id]:
-                # Include agent logfile if available
-                agent_logfile = self.runs[id].get('agent_logfile', None)
-                error_result['tests'].append({
-                    "result": 1,
-                    "log": agent_logfile,
-                    "error_msg": f"Agent error: {self.runs[id]['agent_error']}",
-                    "execution": 0.0
-                })
-                error_result['errors'] += 1
             
-            # Add agent logfile to result metadata if available
-            if id in self.runs and 'agent_logfile' in self.runs[id]:
-                error_result['agent_logfile'] = self.runs[id]['agent_logfile']
-
-            # Add agent status/returncode/execution metadata (upstream)
+            # Add agent metadata without adding a synthetic harness test.
             self._copy_agent_metadata_to_result(id, error_result)
             
             # Put the error result in the queue so the main thread knows this task is done

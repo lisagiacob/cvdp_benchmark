@@ -118,6 +118,8 @@ Each agent build script ([src/agents/](src/agents/)`*/build_agent.sh`) builds on
 | Agentic, non-commercial, cocotb v2 | `make claude-cocov2` | `make opencode-cocov2` | `make codex-cocov2` |
 | Agentic, commercial (Cadence) | `make claude-commercial` | `make opencode-commercial` | `make codex-commercial` |
 | Single datapoint (debug, cocotb v2) | `make claude-sd DP=<id>` | `make opencode-sd DP=<id>` | `make codex-sd DP=<id>` |
+| Heavy agentic v1.1.0, non-commercial (real git repos) | `make claude-heavy` | `make opencode-heavy` | `make codex-heavy` |
+| Heavy agentic v1.1.0, commercial (Cadence) | `make claude-heavy-commercial` | `make opencode-heavy-commercial` | `make codex-heavy-commercial` |
 
 The `*-commercial` targets pass the agent image without a tag, so they use `:latest` (= v2). Targets that don't override `OSS_SIM_IMAGE` use the value in `.env`.
 
@@ -128,6 +130,8 @@ The `*-commercial` targets pass the agent image without a tag, so they use `:lat
 Make variables:
 - `MODEL=<model>`: model for the non-agentic targets. Always set it: the default `azure-gpt-4o` is not registered in this repository's model factories.
 - `DP=<datapoint id>`: datapoint for the `*-sd` targets (default `cvdp_agentic_AES_encryption_decryption_0018`).
+
+The `*-heavy*` targets need the git bundles from the [🤗 HF dataset](https://huggingface.co/datasets/nvidia/cvdp-benchmark-dataset/tree/main/cvdp_v1.1.0_agentic_heavy_code_generation_public) in `../cvdp_v1.1.0_agentic_heavy_code_generation_public/` (or `HEAVY_REPOS=<dir>`); `DP=<id>` runs a single datapoint.
 
 Every `*-sd`, `*-cocov*`, `*-commercial` and `nonagentic-*` target:
 - writes results to its own `work_<target>/` directory (`report.txt`, `report.json`, plus per-datapoint harness and agent logs), so different targets can run in parallel; override it with `BENCHMARK_PREFIX=<dir>`;
