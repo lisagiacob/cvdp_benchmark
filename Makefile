@@ -31,7 +31,8 @@ cocov2:
 .PHONY: cocov2-heavy
 cocov2-heavy:
 	docker build -f docker/Dockerfile.heavy-extras -t osvb-cocotb:v2-heavy . \
-		--build-arg BASE=osvb-cocotb:v2 --build-arg PKGS="aes==1.2.0 cocotbext-axi==0.1.28"
+		--build-arg BASE=osvb-cocotb:v2 --build-arg APT_PKGS=clang \
+		--build-arg PKGS="aes==1.2.0 cocotbext-axi==0.1.28"
 
 COCOV1_TARGETS := nonagentic-codegen-v1 opencode-cocov1 claude-cocov1 codex-cocov1 \
 	opencode-cocov1-ba claude-cocov1-ba codex-cocov1-ba

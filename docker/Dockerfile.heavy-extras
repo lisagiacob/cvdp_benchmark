@@ -1,12 +1,26 @@
-# Extra Python packages needed by some CVDP v1.1.0 heavy agentic harnesses,
+# Extra packages needed by some CVDP v1.1.0 heavy agentic harnesses,
 # layered on top of an existing verification image so the base tag (used by
 # all the other thesis runs) stays untouched:
 #   aes           cheriot-ibex_0003/0007, caliptra-rtl_0002, enso_0109,
 #                 verilog_axi_0007 (imported by their harness_library.py)
 #   cocotbext-axi verilog_axi_0001
-# Versions pinned as in upstream's docker/requirements.txt (nvidia/cvdp-sim).
+#   clang         Verilator in the osvb base is configured with CXX=clang++
+#                 but ships no C++ compiler: needed by the SIM=verilator
+#                 harnesses (cheriot-ibex, cva6_riscv_core, i2c_0007)
+# Python versions pinned as in upstream's docker/requirements.txt (nvidia/cvdp-sim).
 # Built by `make cocov2-heavy` / `make cadence-cocotb2-heavy`.
 ARG BASE
 FROM ${BASE}
+# apt from the Debian snapshot the osvb base was built from (bullseye is EOL:
+# the live security mirror wants a newer libc6 it no longer serves), so the
+# installed system libraries are not upgraded.
+ARG APT_PKGS=""
+ARG APT_SNAPSHOT=20240722T000000Z
+RUN if [ -n "${APT_PKGS}" ]; then \
+        printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/%s bullseye main\ndeb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/%s bullseye-security main\ndeb [check-valid-until=no] http://snapshot.debian.org/archive/debian/%s bullseye-updates main\n' \
+            "${APT_SNAPSHOT}" "${APT_SNAPSHOT}" "${APT_SNAPSHOT}" > /etc/apt/sources.list && \
+        apt-get update && apt-get install -y --no-install-recommends ${APT_PKGS} && \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
 ARG PKGS
 RUN python3 -m pip install --no-cache-dir ${PKGS}
