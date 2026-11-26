@@ -1632,7 +1632,10 @@ class AgenticProcessor (DatasetProcessor):
 
     def _build_agent_prompt_payload(self, id):
         prompt = self.context[id]['prompt']
-        if getattr(self, 'include_harness', False) and self._is_heavy_datapoint(id):
+        # (With --iter-to-convergence the OpenCode wrapper's own prompt already
+        # lists the harness location, from the ITC state.)
+        if (getattr(self, 'include_harness', False) and self._is_heavy_datapoint(id)
+                and not getattr(self, 'iter_to_convergence', False)):
             root = self.HEAVY_HARNESS_ROOT
             prompt = (
                 f"{prompt}\n\n"
@@ -2678,7 +2681,11 @@ class AgenticProcessor (DatasetProcessor):
                     # For context-heavy datapoints, just run the agent - volume-based patch generation
                     # is handled in agent_run method
                     protected_file_snapshots = self._snapshot_agent_infrastructure_files(issue_path)
-                    agent_metadata = self.agent_run(issue_path, self.agent, data_id=id)
+                    if getattr(self, 'iter_to_convergence', False):
+                        agent_metadata = self._itc_agent_loop(
+                            id, issue_path, None, None, workspace_volume=f"{id}_workspace")
+                    else:
+                        agent_metadata = self.agent_run(issue_path, self.agent, data_id=id)
                     patch_file = os.path.join(issue_path, "agent_changes.patch")
                     has_changes = False
                     if os.path.exists(patch_file):
@@ -3090,7 +3097,7 @@ class AgenticProcessor (DatasetProcessor):
                     chunks.append(self._diff(a, b, self._agent_context_path(d, rel)))
         return "\n\n".join(chunks)
 
-    def _itc_agent_loop(self, id, issue_path, before_dir, dir_names):
+    def _itc_agent_loop(self, id, issue_path, before_dir, dir_names, workspace_volume=None):
         """Run the agent, grade it with the official harness and, while it fails,
         resume the same agent session with the harness output.
 
@@ -3102,6 +3109,12 @@ class AgenticProcessor (DatasetProcessor):
         usage so tools reading the first usage_summary line see the whole loop.
         Returns the agent metadata dict of the last session (see _agent_metadata),
         with agent_logfile pointing at the combined log.
+
+        Context-heavy datapoints pass `workspace_volume` (the repo checkout the agent
+        and the harness both mount at /code) instead of before_dir/dir_names: the
+        cumulative patch is then the diff of that volume against a snapshot taken
+        before the first session, and it also becomes agent_changes.patch (agent_run
+        only diffs against the start of its own session).
         """
         issue_path = os.path.abspath(issue_path)
         issue_id = os.path.basename(issue_path)
@@ -3118,6 +3131,22 @@ class AgenticProcessor (DatasetProcessor):
             logging.warning(f"[ITC] {id}: no prepared repository, running a single agent session")
             return self.agent_run(issue_path, self.agent, data_id=id)
 
+        base_volume = None
+        if workspace_volume:
+            base_volume = self._create_before_snapshot_volume(
+                workspace_volume, issue_path, before_volume=f"{workspace_volume}_itc_base")
+            if base_volume is None:
+                logging.warning(f"[ITC] {id}: could not snapshot {workspace_volume}, running a single agent session")
+                return self.agent_run(issue_path, self.agent, data_id=id)
+        try:
+            return self._itc_run_iterations(id, issue_path, itc_dir, ctl_dir, repo, issue_id,
+                                            before_dir, dir_names, workspace_volume, base_volume)
+        finally:
+            if base_volume:
+                subprocess.run(["docker", "volume", "rm", "-f", base_volume], check=False, capture_output=True)
+
+    def _itc_run_iterations(self, id, issue_path, itc_dir, ctl_dir, repo, issue_id,
+                            before_dir, dir_names, workspace_volume, base_volume):
         max_iter = max(1, config.get('ITC_MAX_ITERATIONS') or 10)
         stall = max(1, config.get('ITC_STALL_THRESHOLD') or 3)
         agent_timeout = config.get('ITC_AGENT_TIMEOUT') or 0
@@ -3139,6 +3168,8 @@ class AgenticProcessor (DatasetProcessor):
                     "max_iterations": max_iter,
                     "category": self.context[id]['categories'][0],
                     "harness_visible": bool(getattr(self, 'include_harness', False)),
+                    "harness_root": self.HEAVY_HARNESS_ROOT if workspace_volume else None,
+                    "heavy": bool(workspace_volume),
                     "agent_timeout": agent_timeout,
                 }, f)
             with open(os.path.join(ctl_dir, "feedback.md"), "w") as f:
@@ -3154,9 +3185,13 @@ class AgenticProcessor (DatasetProcessor):
             iter_log = os.path.join(reports_dir, f"{issue_id}_agent_iter{k}.txt")
             if os.path.exists(agent_logfile):
                 shutil.copy2(agent_logfile, iter_log)
-            patch = self._itc_cumulative_patch(issue_path, before_dir, dir_names)
-            with open(os.path.join(issue_path, f"agent_changes_iter{k}.patch"), "w", encoding="utf-8") as f:
-                f.write(patch)
+            if workspace_volume:
+                patch = self._generate_volume_changes_patch(
+                    workspace_volume, base_volume, issue_path, out_name=f"agent_changes_iter{k}.patch") or ""
+            else:
+                patch = self._itc_cumulative_patch(issue_path, before_dir, dir_names)
+                with open(os.path.join(issue_path, f"agent_changes_iter{k}.patch"), "w", encoding="utf-8") as f:
+                    f.write(patch)
 
             print(f"[ITC] {id}: iteration {k}/{max_iter}, official harness")
             if isolate_rundir:
@@ -3216,6 +3251,9 @@ class AgenticProcessor (DatasetProcessor):
         print(f"[ITC] {id}: stop={stop_reason} after {len(iterations)} iteration(s)")
         # Metadata of the last agent session; the logfile is the combined one
         agent_metadata["agent_logfile"] = agent_logfile
+        if workspace_volume:
+            # Whole-loop patch (agent_run's covers only the last session)
+            self._generate_volume_changes_patch(workspace_volume, base_volume, issue_path)
         return agent_metadata
 
     @staticmethod
@@ -3310,7 +3348,8 @@ class AgenticProcessor (DatasetProcessor):
 
 
 
-    def _generate_volume_changes_patch(self, workspace_volume: str, before_volume: str, issue_path: str):
+    def _generate_volume_changes_patch(self, workspace_volume: str, before_volume: str, issue_path: str,
+                                       out_name: str = "agent_changes.patch"):
         """
         Generate agent_changes.patch by comparing the current workspace volume content
         with the before snapshot volume, without extracting files to disk.
@@ -3333,6 +3372,9 @@ class AgenticProcessor (DatasetProcessor):
                 "cd / && "
                 "diff -ruN before after "
                 "--exclude='.*' --exclude='prompt.json' --exclude='rundir' "
+                # Agent wrapper logs written to the working dir /code (OpenCode, Claw Code)
+                "--exclude='opencode_stdout.log' --exclude='opencode_stderr.log' "
+                "--exclude='claw_stdout.log' --exclude='claw_stderr.log' "
                 "2>/dev/null || true"  # diff returns non-zero when differences found
             ]
             
@@ -3346,29 +3388,31 @@ class AgenticProcessor (DatasetProcessor):
                 diff_output = diff_output.replace("after/", "b/")
                 
                 # Write the patch to agent_changes.patch
-                patch_file = os.path.join(issue_path, "agent_changes.patch")
+                patch_file = os.path.join(issue_path, out_name)
                 with open(patch_file, 'w', encoding='utf-8') as f:
                     f.write(diff_output)
-                
+                return diff_output
+
             else:
                 # Create empty patch file to indicate no changes
-                patch_file = os.path.join(issue_path, "agent_changes.patch")
+                patch_file = os.path.join(issue_path, out_name)
                 with open(patch_file, 'w', encoding='utf-8') as f:
                     f.write("# No changes detected\n")
-                
+                return ""
+
         except Exception as e:
             print(f"[WARNING] Failed to generate patch from volumes: {e}")
             
             # Fallback: create simple status file
             try:
-                status_file = os.path.join(issue_path, "agent_changes.patch")
+                status_file = os.path.join(issue_path, out_name)
                 with open(status_file, 'w', encoding='utf-8') as f:
                     f.write(f"# Error generating patch: {e}\n")
                 print(f"[INFO] Created error status in agent_changes.patch")
             except Exception as e2:
                 print(f"[ERROR] Failed to create error status file: {e2}")
 
-    def _create_before_snapshot_volume(self, workspace_volume: str, issue_path: str):
+    def _create_before_snapshot_volume(self, workspace_volume: str, issue_path: str, before_volume: str = None):
         """
         Create a snapshot Docker volume of the workspace volume before the agent runs,
         for later comparison to generate agent_changes.patch.
@@ -3379,7 +3423,7 @@ class AgenticProcessor (DatasetProcessor):
         Returns the name of the created before volume.
         """
         # Generate a unique name for the before volume
-        before_volume = f"{workspace_volume}_before"
+        before_volume = before_volume or f"{workspace_volume}_before"
         
         try:
             # Create the before volume

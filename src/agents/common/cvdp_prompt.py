@@ -51,6 +51,8 @@ def build_cvdp_prompt(
     iterate_to_convergence: bool = False,
     category: str | None = None,
     harness_visible: bool = False,
+    harness_root: str | None = None,
+    heavy: bool = False,
 ) -> str:
     """Build the benchmark-aware prompt passed to an external coding CLI.
 
@@ -58,7 +60,9 @@ def build_cvdp_prompt(
     With `iterate_to_convergence` the prompt explains that the official harness
     grades the work after the session and that its output comes back until it
     passes; `category` selects the task-type guidance and `harness_visible`
-    says whether src/ (the harness) is mounted.
+    says whether src/ (the harness) is mounted. Context-heavy datapoints
+    (`heavy`) are a full project checkout instead of the rtl/verif/docs layout,
+    and their harness is mounted under `harness_root` (outside the repo).
     """
     code_root = str(code_root)
     payload = payload or {}
@@ -85,20 +89,30 @@ def build_cvdp_prompt(
             "vectors, hard-code expected values or detect the simulation environment.",
             "",
             "Directory layout:",
-            f"- {code_root}/rtl    — RTL design files",
-            f"- {code_root}/verif  — verification files (testbenches)",
-            f"- {code_root}/docs   — documentation (read for context)",
-            f"- {code_root}/rundir — transient run artifacts (ignore unless needed)",
         ]
-        if harness_visible:
+        if heavy:
             lines += [
-                f"- {code_root}/src    — the official benchmark harness (READ-ONLY): the tests your "
+                f"- {code_root}        — the project repository (a real codebase: explore it to find "
+                "the files the task refers to)",
+                f"- {code_root}/rundir — transient run artifacts (ignore unless needed)",
+            ]
+        else:
+            lines += [
+                f"- {code_root}/rtl    — RTL design files",
+                f"- {code_root}/verif  — verification files (testbenches)",
+                f"- {code_root}/docs   — documentation (read for context)",
+                f"- {code_root}/rundir — transient run artifacts (ignore unless needed)",
+            ]
+        if harness_visible:
+            h_root = str(harness_root or code_root)
+            lines += [
+                f"- {h_root}/src    — the official benchmark harness (READ-ONLY): the tests your "
                 "work is graded with",
-                f"- {code_root}/docker-compose.yml — how the official harness is run (READ-ONLY)",
+                f"- {h_root}/docker-compose.yml — how the official harness is run (READ-ONLY)",
                 "",
-                "You may run the harness from src/ yourself if the tools in your environment allow it, "
-                "but the official run may use a different environment, so treat local results as "
-                "indicative.",
+                f"You may run the harness from {h_root}/src yourself if the tools in your environment "
+                "allow it, but the official run may use a different environment, so treat local "
+                "results as indicative.",
             ]
     else:
         lines += [

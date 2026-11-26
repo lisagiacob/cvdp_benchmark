@@ -76,7 +76,8 @@ def build_opencode_prompt(prompt_text: str, payload: dict | None = None, itc: di
         return build_cvdp_prompt(prompt_text, payload, code_root=CODE_ROOT)
     return build_cvdp_prompt(
         prompt_text, payload, code_root=CODE_ROOT, iterate_to_convergence=True,
-        category=itc.get("category"), harness_visible=bool(itc.get("harness_visible")))
+        category=itc.get("category"), harness_visible=bool(itc.get("harness_visible")),
+        harness_root=itc.get("harness_root"), heavy=bool(itc.get("heavy")))
 
 def _stream_pipe(pipe, log_path: Path, mirror_to_stderr: bool = False) -> None:
     """Stream a subprocess pipe live to both console and a log file."""
