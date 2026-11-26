@@ -340,6 +340,10 @@ heavy-check:
 	@if [ ! -d "$(HEAVY_REPOS)" ] || [ -z "$$(ls "$(HEAVY_REPOS)"/*.bundle 2>/dev/null)" ]; then \
 		echo "Error: no .bundle files in $(HEAVY_REPOS). Download them from HF or pass HEAVY_REPOS=<dir>." >&2; exit 1; \
 	fi
+# Some open-source heavy harnesses (i2c_0007/0046/0049, pequeno_riscv_0008) declare the
+# external licnetwork even though they run on the OSS image, and the benchmark only
+# creates it for Cadence datapoints: make sure it exists (plain bridge, as auto-created).
+	@docker network inspect licnetwork >/dev/null 2>&1 || docker network create licnetwork --driver bridge >/dev/null
 
 opencode-heavy: heavy-check
 	$(call run_and_notify,$(RUN) run_benchmark.py -f $(HEAVY_NOCOMM) -l -g cvdp-opencode-agent:v2 $(HEAVY_DP),opencode-heavy)
