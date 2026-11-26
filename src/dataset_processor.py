@@ -1621,8 +1621,26 @@ class AgenticProcessor (DatasetProcessor):
     AGENT_MOUNTS_OVERRIDE = "CVDP_AGENT_MOUNTS"
     AGENT_WORKSPACE_ROOTS_OVERRIDE = "CVDP_AGENT_WORKSPACE_ROOTS"
 
+    # Harness-aware (HAF) context-heavy runs: the harness is mounted outside the
+    # repository, because /code is the checked-out project and some repos have
+    # their own src/ (often the very files the task edits), which a /code/src
+    # mount would hide and make read-only.
+    HEAVY_HARNESS_ROOT = "/harness"
+
+    def _is_heavy_datapoint(self, id):
+        return bool(id) and 'agentic_heavy' in id
+
     def _build_agent_prompt_payload(self, id):
-        return {"prompt": self.context[id]['prompt']}
+        prompt = self.context[id]['prompt']
+        if getattr(self, 'include_harness', False) and self._is_heavy_datapoint(id):
+            root = self.HEAVY_HARNESS_ROOT
+            prompt = (
+                f"{prompt}\n\n"
+                f"The official benchmark harness that grades this task is available READ-ONLY at "
+                f"{root}/src (the tests) and {root}/docker-compose.yml (how it is run). "
+                f"In the harness container the repository is mounted at /code and the harness at /src."
+            )
+        return {"prompt": prompt}
 
     def _split_agent_env_spec(self, value):
         if not value:
@@ -2242,16 +2260,19 @@ class AgenticProcessor (DatasetProcessor):
             # First, make sure src directory exists and is populated
             # Read-only: the official evaluation mounts this same src/, so the
             # agent must not be able to change the harness it is graded with.
+            # Context-heavy: outside /code (see HEAVY_HARNESS_ROOT); this also keeps
+            # the bind-mount points out of the workspace volume and its patch.
+            harness_root = self.HEAVY_HARNESS_ROOT if (use_git_workspace and workspace_volume) else "/code"
             src_dir = os.path.join(issue_path, "src")
             if os.path.exists(src_dir):
-                docker_compose['services']['agent']['volumes'].append('./src:/code/src:ro')
-                print("Test harness src directory will be mounted (read-only) in the agent container at /code/src")
+                docker_compose['services']['agent']['volumes'].append(f'./src:{harness_root}/src:ro')
+                print(f"Test harness src directory will be mounted (read-only) in the agent container at {harness_root}/src")
 
             # Add the docker-compose.yml file that was used to run the tests
             docker_compose_yml = os.path.join(issue_path, "docker-compose.yml")
             if os.path.exists(docker_compose_yml):
-                docker_compose['services']['agent']['volumes'].append('./docker-compose.yml:/code/docker-compose.yml:ro')
-                print("Original docker-compose.yml will be mounted (read-only) in the agent container at /code/docker-compose.yml")
+                docker_compose['services']['agent']['volumes'].append(f'./docker-compose.yml:{harness_root}/docker-compose.yml:ro')
+                print(f"Original docker-compose.yml will be mounted (read-only) in the agent container at {harness_root}/docker-compose.yml")
 
         # Iterate-to-convergence: persistent OpenCode home (so the session can be
         # resumed) and the loop state/feedback written by _itc_agent_loop()

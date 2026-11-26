@@ -62,7 +62,9 @@ HEAVY_NOCOMM := dataset/cvdp_v1.1.0_agentic_heavy_code_generation_no_commercial.
 HEAVY_COMM := dataset/cvdp_v1.1.0_agentic_heavy_code_generation_commercial.jsonl
 HEAVY_REPOS ?= $(abspath $(CURDIR)/../cvdp_v1.1.0_agentic_heavy_code_generation_public)
 HEAVY_TARGETS := opencode-heavy claude-heavy codex-heavy \
-	opencode-heavy-commercial claude-heavy-commercial codex-heavy-commercial
+	opencode-heavy-commercial claude-heavy-commercial codex-heavy-commercial \
+	opencode-heavy-ba claude-heavy-ba codex-heavy-ba \
+	opencode-heavy-commercial-ba claude-heavy-commercial-ba codex-heavy-commercial-ba
 # Same settings as the v1.1.0 targets, but with the *-heavy images (base image +
 # the extra Python packages some heavy harnesses import, see
 # docker/Dockerfile.heavy-extras), so osvb-cocotb:v2 and cadence :cocotb2 stay
@@ -354,6 +356,28 @@ claude-heavy-commercial: heavy-check
 
 codex-heavy-commercial: heavy-check
 	$(call run_and_notify,$(RUN) run_benchmark.py -f $(HEAVY_COMM) -l -g codex-agent:v2 $(HEAVY_DP),codex-heavy-commercial)
+
+# Harness aware (HAF/BA): the harness is mounted read-only in the agent container.
+# For heavy datapoints it goes to /harness/src + /harness/docker-compose.yml (not
+# /code/src: some repos have their own src/) and the prompt says where it is.
+# Commercial BA also gets Cadence xrun, like the other *-commercial-ba targets.
+opencode-heavy-ba: heavy-check
+	$(call run_and_notify,$(RUN) run_benchmark.py -f $(HEAVY_NOCOMM) -l -g cvdp-opencode-agent:v2 --force-agentic-include-harness $(HEAVY_DP),opencode-heavy-ba)
+
+claude-heavy-ba: heavy-check
+	$(call run_and_notify,$(RUN) run_benchmark.py -f $(HEAVY_NOCOMM) -l -g claude-code-agent:v2 --force-agentic-include-harness $(HEAVY_DP),claude-heavy-ba)
+
+codex-heavy-ba: heavy-check
+	$(call run_and_notify,$(RUN) run_benchmark.py -f $(HEAVY_NOCOMM) -l -g codex-agent:v2 --force-agentic-include-harness $(HEAVY_DP),codex-heavy-ba)
+
+opencode-heavy-commercial-ba: heavy-check
+	$(call run_and_notify,$(RUN) run_benchmark.py -f $(HEAVY_COMM) -l -g cvdp-opencode-agent:v2 --force-agentic-include-harness --agent-include-eda $(HEAVY_DP),opencode-heavy-commercial-ba)
+
+claude-heavy-commercial-ba: heavy-check
+	$(call run_and_notify,$(RUN) run_benchmark.py -f $(HEAVY_COMM) -l -g claude-code-agent:v2 --force-agentic-include-harness --agent-include-eda $(HEAVY_DP),claude-heavy-commercial-ba)
+
+codex-heavy-commercial-ba: heavy-check
+	$(call run_and_notify,$(RUN) run_benchmark.py -f $(HEAVY_COMM) -l -g codex-agent:v2 --force-agentic-include-harness --agent-include-eda $(HEAVY_DP),codex-heavy-commercial-ba)
 
 # ----------------------------- HARNESS RERUN (v1.1.0) ------------------------------
 # Re-grades the agent output of a finished v1.0.2 run with the v1.1.0 harness,
