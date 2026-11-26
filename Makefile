@@ -27,6 +27,12 @@ cocov1:
 cocov2:
 	docker build -f docker/Dockerfile.osvb-cocotb -t osvb-cocotb:v2 . --build-arg COCOTB_VERSION=v2
 
+# osvb-cocotb:v2 + the packages some heavy harnesses need (for the *-heavy targets)
+.PHONY: cocov2-heavy
+cocov2-heavy:
+	docker build -f docker/Dockerfile.heavy-extras -t osvb-cocotb:v2-heavy . \
+		--build-arg BASE=osvb-cocotb:v2 --build-arg PKGS="aes==1.2.0 cocotbext-axi==0.1.28"
+
 COCOV1_TARGETS := nonagentic-codegen-v1 opencode-cocov1 claude-cocov1 codex-cocov1 \
 	opencode-cocov1-ba claude-cocov1-ba codex-cocov1-ba
 COCOV2_TARGETS := nonagentic-codegen-v2 opencode-cocov2 claude-cocov2 codex-cocov2 \
@@ -57,9 +63,15 @@ HEAVY_COMM := dataset/cvdp_v1.1.0_agentic_heavy_code_generation_commercial.jsonl
 HEAVY_REPOS ?= $(abspath $(CURDIR)/../cvdp_v1.1.0_agentic_heavy_code_generation_public)
 HEAVY_TARGETS := opencode-heavy claude-heavy codex-heavy \
 	opencode-heavy-commercial claude-heavy-commercial codex-heavy-commercial
-V110_TARGETS += $(HEAVY_TARGETS)
+# Same settings as the v1.1.0 targets, but with the *-heavy images (base image +
+# the extra Python packages some heavy harnesses import, see
+# docker/Dockerfile.heavy-extras), so osvb-cocotb:v2 and cadence :cocotb2 stay
+# identical to the ones used by the other runs.
+$(HEAVY_TARGETS): export OSS_SIM_IMAGE = osvb-cocotb:v2-heavy
+$(HEAVY_TARGETS): export VERIF_EDA_IMAGE = cvdp-cadence-verif:cocotb2-heavy
+$(HEAVY_TARGETS): export NEW_HARNESS = true
 $(HEAVY_TARGETS): export CVDP_HEAVY_REPOS_PATH = $(HEAVY_REPOS)
-BENCH_TARGETS := $(COCOV1_TARGETS) $(COCOV2_TARGETS) $(V110_TARGETS) \
+BENCH_TARGETS := $(COCOV1_TARGETS) $(COCOV2_TARGETS) $(V110_TARGETS) $(HEAVY_TARGETS) \
 	opencode-commercial claude-commercial codex-commercial \
 	opencode-commercial-eda claude-commercial-eda codex-commercial-eda \
 	opencode-commercial-ba claude-commercial-ba codex-commercial-ba
@@ -201,6 +213,12 @@ cadence-up:
 cadence-cocotb2:
 	docker build -t cvdp-cadence-verif:cocotb2 -f docker/Dockerfile-cadence-verif-cocotb2 .
 
+# cvdp-cadence-verif:cocotb2 + aes, for the *-heavy-commercial targets (needs cadence-cocotb2 first)
+.PHONY: cadence-cocotb2-heavy
+cadence-cocotb2-heavy:
+	docker build -f docker/Dockerfile.heavy-extras -t cvdp-cadence-verif:cocotb2-heavy . \
+		--build-arg BASE=cvdp-cadence-verif:cocotb2 --build-arg PKGS="aes==1.2.0"
+
 # Benchmarks — agentic (require claude code container running)
 .PHONY: claude-cocov1 claude-cocov2 claude-sd claude-commercial claude-commercial-eda
 claude-cocov1:
@@ -308,7 +326,8 @@ codex-v110-commercial-ba:
 	$(call run_and_notify,$(RUN) run_benchmark.py -f $(V110_COMM) -l -g codex-agent:v2 --force-agentic-include-harness --agent-include-eda,codex-v110-commercial-ba)
 
 # ------------------------------ HEAVY AGENTIC (v1.1.0) ------------------------------
-# Needs the bundles from HF in HEAVY_REPOS (default ../cvdp_v1.1.0_agentic_heavy_code_generation_public).
+# Needs the bundles from HF in HEAVY_REPOS (default ../cvdp_v1.1.0_agentic_heavy_code_generation_public)
+# and the images from `make cocov2-heavy` (+ `make cadence-cocotb2-heavy` for *-commercial).
 # One datapoint only: DP=<id>, e.g. make claude-heavy DP=cvdp_agentic_heavy_rvx_0004
 .PHONY: $(HEAVY_TARGETS) heavy-check
 HEAVY_DP = $(if $(DP),-i $(DP))

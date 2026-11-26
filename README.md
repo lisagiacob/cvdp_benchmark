@@ -131,7 +131,7 @@ Make variables:
 - `MODEL=<model>`: model for the non-agentic targets. Always set it: the default `azure-gpt-4o` is not registered in this repository's model factories.
 - `DP=<datapoint id>`: datapoint for the `*-sd` targets (default `cvdp_agentic_AES_encryption_decryption_0018`).
 
-The `*-heavy*` targets need the git bundles from the [🤗 HF dataset](https://huggingface.co/datasets/nvidia/cvdp-benchmark-dataset/tree/main/cvdp_v1.1.0_agentic_heavy_code_generation_public) in `../cvdp_v1.1.0_agentic_heavy_code_generation_public/` (or `HEAVY_REPOS=<dir>`); `DP=<id>` runs a single datapoint.
+The `*-heavy*` targets need the git bundles from the [🤗 HF dataset](https://huggingface.co/datasets/nvidia/cvdp-benchmark-dataset/tree/main/cvdp_v1.1.0_agentic_heavy_code_generation_public) in `../cvdp_v1.1.0_agentic_heavy_code_generation_public/` (or `HEAVY_REPOS=<dir>`); `DP=<id>` runs a single datapoint. They use dedicated images with the extra Python packages some heavy harnesses import (`aes`, `cocotbext-axi`): build them with `make cocov2-heavy` (`osvb-cocotb:v2-heavy`) and, for `*-heavy-commercial`, `make cadence-cocotb2-heavy` (`cvdp-cadence-verif:cocotb2-heavy`). The base `:v2` / `:cocotb2` images are left unchanged.
 
 Every `*-sd`, `*-cocov*`, `*-commercial` and `nonagentic-*` target:
 - writes results to its own `work_<target>/` directory (`report.txt`, `report.json`, plus per-datapoint harness and agent logs), so different targets can run in parallel; override it with `BENCHMARK_PREFIX=<dir>`;
